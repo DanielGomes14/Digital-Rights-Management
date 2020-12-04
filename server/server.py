@@ -2,6 +2,10 @@
 
 from twisted.web import server, resource
 from twisted.internet import reactor, defer
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+from cryptography.hazmat.backends import default_backend  
+from cryptography.hazmat.primitives.asymmetric import rsa  
+from cryptography.hazmat.primitives import serialization  
 import logging
 import binascii
 import json
@@ -29,7 +33,15 @@ CHUNK_SIZE = 1024 * 4
 
 class MediaServer(resource.Resource):
     isLeaf = True
+    def __init__(self):
+        self.ciphers=[]
+        self.digests=[]
+        self.ciphermodes=[]
+        # self.ciphers = ['AES','3DES','ChaCha20']
+        # self.digests = ['SHA-256','SHA-384','SHA-512']
+        # self.ciphermodes = ['CBC','GCM','ECB']
 
+        
     # Send the list of media files to clients
     def do_list(self, request):
 
@@ -121,20 +133,25 @@ class MediaServer(resource.Resource):
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
+        print(request.uri)
 
         try:
             if request.path == b'/api/protocols':
                 return self.do_get_protocols(request)
-            #elif request.uri == 'api/key':
-            #...
+            elif request.uri == b'/api/key':
+                print("fdsss")
+            #...chave publica do server
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({"data":"key"}).encode("latin")
             #elif request.uri == 'api/auth':
-
+            #autenticaçao, later on..
             elif request.path == b'/api/list':
                 return self.do_list(request)
 
             elif request.path == b'/api/download':
                 return self.do_download(request)
             else:
+                print("fds")
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
                 return b'Methods: /api/protocols /api/list /api/download'
 
