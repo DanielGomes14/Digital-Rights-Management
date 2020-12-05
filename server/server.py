@@ -34,12 +34,12 @@ CHUNK_SIZE = 1024 * 4
 class MediaServer(resource.Resource):
     isLeaf = True
     def __init__(self):
-        self.ciphers=[]
-        self.digests=[]
-        self.ciphermodes=[]
-        # self.ciphers = ['AES','3DES','ChaCha20']
-        # self.digests = ['SHA-256','SHA-384','SHA-512']
-        # self.ciphermodes = ['CBC','GCM','ECB']
+        #self.ciphers=[]
+        #self.digests=[]
+        #self.ciphermodes=[]
+        self.ciphers = ['AES','3DES','ChaCha20']
+        self.digests = ['SHA-256','SHA-384','SHA-512']
+        self.ciphermodes = ['CBC','GCM','ECB']
 
         
     # Send the list of media files to clients
@@ -130,6 +130,56 @@ class MediaServer(resource.Resource):
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
+    def do_get_protocols(self,request):
+        #receber os algoritmos e ver quais é o servidor tem
+        print(request.content)
+
+
+    def send_message(self,method):
+        message = None
+        if method == 'ALG':
+            message = json.dumps({'method': method,'cipher':self.cipher,'mode':self.mode,'digest':self.digest}).encode('latin')
+
+        return message
+    
+    def send_error_message(self,method):
+        message=None
+        if method=='ALG':
+            message={'method': 'ALG', 'error': True}
+        else:
+            pass
+        return message
+    
+        
+    def do_post_protocols(self,request):
+        data = json.loads(request.content.getvalue())
+        method=data['method']
+        message=None
+        if method == 'ALG':
+            logger.debug('CHECKING CIPHERS')
+            client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
+            availableciphers=[c for c in self.ciphers if c in client_ciphers]
+            availabledigests=[c for c in  self.digests if c in client_digests]
+            availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
+            if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
+                logger.error('NO AVAILABLE CIPHERS,DIGESTs OR CIPHERMODES')
+                message=self.send_error_message(method)
+            else:
+                # enviar mensagem a dizer q n pode
+                #server chooses the cipher to communicate acordding to client's available ciphers
+                self.cipher = availableciphers[0]
+                self.digest = availabledigests[0]
+                self.mode   = availablemodes[0]
+                print(self.cipher,self.digest,self.mode)
+                logger.debug('Sucess checking ciphers')
+                #enviar 
+                message= self.send_message(method)
+
+        
+        return message
+
+
+    
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
@@ -139,10 +189,9 @@ class MediaServer(resource.Resource):
             if request.path == b'/api/protocols':
                 return self.do_get_protocols(request)
             elif request.uri == b'/api/key':
-                print("fdsss")
             #...chave publica do server
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({"data":"key"}).encode("latin")
+                return json.dumps({"KEY":"key"}).encode("latin")
             #elif request.uri == 'api/auth':
             #autenticaçao, later on..
             elif request.path == b'/api/list':
@@ -161,10 +210,21 @@ class MediaServer(resource.Resource):
             request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
             return b''
     
+    
     # Handle a POST request
     def render_POST(self, request):
         logger.debug(f'Received POST for {request.uri}')
-        request.setResponseCode(501)
+        try:
+            if request.uri == b'/api/protocols':
+                return self.do_post_protocols(request)
+
+        except Exception as e:
+            logger.exception(e)
+            request.setResponseCode(500)
+            request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
+            return b''
+
+        #request.setResponseCode(501) #Not implemented
         return b''
 
 

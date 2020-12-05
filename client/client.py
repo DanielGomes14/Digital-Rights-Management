@@ -23,24 +23,50 @@ class Client:
     def __init__(self):
         """Representation of the client."""
 
-        self.ciphers = []
+        self.ciphers = ['AES']
         self.digests = ['SHA-256','SHA-512']
-        self.ciphermodes = ['CBC','ECB']
+        self.ciphermodes = ['CBC','ECB','GCM']
         self.srvr_publickey =None
         self.cipher = None
         self.digest = None
         self.ciphermode = None
-    
+        self.key_sizes = {'3DES':[10,10]}
+        
+    def has_negotiated(self):
+        return not (self.cipher is None or self.digest is None or self.digest is None)
+
+
     def send_message(self,method):
         #Negotiate algorithms
-        if method == 'ALG': # TODO: 
-            #when we dont have the server public key yet
-            if not self.srvr_publickey: 
-            #Send to the server client's available types of ciphers,digests, and ciphermodes
-                data = json.dumps({'method':method, 'ciphers':self.ciphers, 'digests':self.digests, 'ciphermode':self.ciphermode})
+        data=None
+        if self.srvr_publickey: 
+            if method == 'ALG': # TODO: 
+                #if the algorithms have not been negotiated yet
+                if not self.has_negotiated() : 
+                    logger.info('Sending POST Request to start negotiating')
+                    #Send to the server client's available types of ciphers,digests, and ciphermodes
+                    data = {'method':method, 'ciphers':self.ciphers, 'digests':self.digests, 'ciphermodes':self.ciphermodes}
+                    request = requests.post(f'{SERVER_URL}/api/protocols',json=data,headers={'Content-Type': 'application/json'})
+                    
+                    return request.text
+            else:
+                pass
         else:
+            # if public key is not known
+            logger.info('Sending GET Request to get Public Key')
+            response = requests.get(f'{SERVER_URL}/api/key')
+            server_pubkey = json.loads(response.content.decode('latin'))
+            if server_pubkey != None and 'KEY'  in server_pubkey: 
+                self.srvr_publickey=server_pubkey['KEY']
+                logger.info('GOT KEY')
+        
+    def encrypt_msg(self,message):
+        #see what algorithm is been use
+        if self.cipher == '3DES':
+            pass    
+        elif self.cipher == 'AES':
             pass
-
+        return message
 
 
 def main():
@@ -54,17 +80,22 @@ def main():
     
     # TODO: Secure the session
     client = Client()
+
     # get server public key
     
-    req = requests.get(f'{SERVER_URL}/api/key')
-    if req:
-        print(req.content)
+    #req = requests.get(f'{SERVER_URL}/api/key')
+    #if req:
+        #print(req.content)
+    client.send_message(None)
+    print(client.send_message('ALG'))
 
     # client or server sends the algorithms to be used and the other sends the response (encoded with public?)
 
     
 
     # client generates simetric key and sends it encrypted with server public key 
+    
+
 
     # validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
 
