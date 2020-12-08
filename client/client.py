@@ -62,7 +62,6 @@ class Client:
                     data = {'method':method, 'ciphers':self.ciphers, 'digests':self.digests, 'ciphermodes':self.ciphermodes}
                     request = requests.post(f'{SERVER_URL}/api/protocols',json=data,headers={'Content-Type': 'application/json'})
                     response=json.loads(request.text)
-                    print(response)
                     if response['method'] == 'ALG_ERROR':
                         logger.info('ERROR NEGOTIATING ALGORITHMS')
                     else:
@@ -70,10 +69,15 @@ class Client:
 
                         self.cipher,self.digest,self.ciphermode=response['cipher'],response['digest'],response['mode']    
             elif method == 'EXCHANGE_KEY':
-                key = self.generate_key()
-                data = {'method':method,'key':key}              
+                logger.info('Sending POST Request to start exchanging a common key')
+                key = self.generate_key().decode('latin')
+                data = {'method':method,'key':key}            
                 request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
-                response = request.text
+                response=json.loads(request.text)
+                if response['method']== 'KEY_ERROR':
+                    logger.info('COULD NOT EXCHANGE A KEY')
+                else:
+                    logger.info('EXCHANGED KEY WITH SUCESS')
             else:
                 pass
         else:

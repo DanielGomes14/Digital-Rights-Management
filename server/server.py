@@ -159,7 +159,7 @@ class MediaServer(resource.Resource):
 
     def keygen(self):
         """
-        Generates a keypair using the cryptography lib and returns a tuple (public, private)
+        Generates a keypair using the cryptography lib and returns a tuple (public_key, private_key)
         """
         private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048)
         public_key = private_key.public_key()
@@ -204,6 +204,7 @@ class MediaServer(resource.Resource):
         
     def do_post_protocols(self,request):
         data = json.loads(request.content.getvalue())
+        print(type(data))
         method=data['method']
         if method == 'NEGOTIATE_ALG':
             return self.negotiate_alg(data)
