@@ -2,9 +2,9 @@
 
 from twisted.web import server, resource
 from twisted.internet import reactor, defer
-from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
-from cryptography.hazmat.backends import default_backend  
-from cryptography.hazmat.primitives.asymmetric import rsa  
+from cryptography.hazmat.backends.interfaces import RSABackend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import dsa, rsa
 from cryptography.hazmat.primitives import serialization  
 import logging
 import binascii
@@ -40,6 +40,7 @@ class MediaServer(resource.Resource):
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
+        self.public_key,self.private = self.keygen()
 
         
     # Send the list of media files to clients
@@ -137,46 +138,79 @@ class MediaServer(resource.Resource):
 
     def send_message(self,method):
         message = None
-        if method == 'ALG':
-            message = json.dumps({'method': method,'cipher':self.cipher,'mode':self.mode,'digest':self.digest}).encode('latin')
-
+        if method == 'NEGOTIATE_ALG':
+            data = {'method': 'ALG_OK','cipher':self.cipher,'mode':self.mode,'digest':self.digest}
+            message = json.dumps(data).encode('latin')
+        elif method == 'EXCHANGE_KEY':
+            data= {'method': 'KEY_OK'}
+            message = json.dumps(data).encode('latin')
         return message
     
     def send_error_message(self,method):
         message=None
-        if method=='ALG':
-            message={'method': 'ALG', 'error': True}
+        if method=='NEGOTIATE_ALG':
+            data={'method': 'ALG_ERROR'}
+            message = json.dumps(data).encode('latin')
         else:
-            pass
+            data= {'method': 'KEY_ERROR'}
+            message = json.dumps(data).encode('latin')
         return message
     
+
+    def keygen(self):
+        """
+        Generates a keypair using the cryptography lib and returns a tuple (public, private)
+        """
+        private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        public_key = private_key.public_key()
+        
+        
+        #print(pem)
+        return (public_key,private_key)
+
+    def negotiate_alg(self,data):
+        logger.debug('CHECKING CIPHERS')
+        message=None
+        client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
+        availableciphers=[c for c in self.ciphers if c in client_ciphers]
+        availabledigests=[c for c in  self.digests if c in client_digests]
+        availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
+        if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
+            logger.error('NO AVAILABLE CIPHERS,DIGESTs OR CIPHERMODES')
+            message=self.send_error_message('NEGOTIATE_ALG')
+        else:
+            # enviar mensagem a dizer q n pode
+            #server chooses the cipher to communicate acordding to client's available ciphers
+            self.cipher = availableciphers[0]
+            self.digest = availabledigests[0]
+            self.mode   = availablemodes[0]
+            print(self.cipher,self.digest,self.mode)
+            logger.debug('Sucess checking ciphers')
+            #enviar 
+            message= self.send_message('NEGOTIATE_ALG')
+        
+        return message
+    
+    def key_exchange(self,data):
+        
+        if 'key' in data:
+            # dar decrypt
+            self.key = data['key']
+            return self.send_message('EXCHANGE_KEY')     
+        
+        return self.send_error_message('EXCHANGE_KEY')
+        
+
         
     def do_post_protocols(self,request):
         data = json.loads(request.content.getvalue())
         method=data['method']
-        message=None
-        if method == 'ALG':
-            logger.debug('CHECKING CIPHERS')
-            client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
-            availableciphers=[c for c in self.ciphers if c in client_ciphers]
-            availabledigests=[c for c in  self.digests if c in client_digests]
-            availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
-            if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
-                logger.error('NO AVAILABLE CIPHERS,DIGESTs OR CIPHERMODES')
-                message=self.send_error_message(method)
-            else:
-                # enviar mensagem a dizer q n pode
-                #server chooses the cipher to communicate acordding to client's available ciphers
-                self.cipher = availableciphers[0]
-                self.digest = availabledigests[0]
-                self.mode   = availablemodes[0]
-                print(self.cipher,self.digest,self.mode)
-                logger.debug('Sucess checking ciphers')
-                #enviar 
-                message= self.send_message(method)
+        if method == 'NEGOTIATE_ALG':
+            return self.negotiate_alg(data)
+        elif method == 'EXCHANGE_KEY':
+            return self.key_exchange(data)
 
         
-        return message
 
 
     
@@ -191,7 +225,9 @@ class MediaServer(resource.Resource):
             elif request.uri == b'/api/key':
             #...chave publica do server
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({"KEY":"key"}).encode("latin")
+                pubkey=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+                print(pubkey)
+                return json.dumps({"KEY":pubkey}).encode("latin")
             #elif request.uri == 'api/auth':
             #autenticaçao, later on..
             elif request.path == b'/api/list':
@@ -218,6 +254,10 @@ class MediaServer(resource.Resource):
             if request.uri == b'/api/protocols':
                 return self.do_post_protocols(request)
 
+            elif request.uri == b'/api/key':
+
+                return self.do_post_protocols(request)
+
         except Exception as e:
             logger.exception(e)
             request.setResponseCode(500)
@@ -233,4 +273,5 @@ print("URL is: http://IP:8080")
 
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
-reactor.run()
+reactor.run()    
+    

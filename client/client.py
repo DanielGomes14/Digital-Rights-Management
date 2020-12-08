@@ -23,42 +23,78 @@ class Client:
     def __init__(self):
         """Representation of the client."""
 
-        self.ciphers = ['AES']
+        self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-512']
-        self.ciphermodes = ['CBC','ECB','GCM']
+        self.ciphermodes = ['CBC','CTR','GCM']
         self.srvr_publickey =None
         self.cipher = None
         self.digest = None
         self.ciphermode = None
-        self.key_sizes = {'3DES':[10,10]}
+        self.key_sizes = {'3DES':[64,128,192],'AES':[128,192,256],'ChaCha20':[256]}
         
     def has_negotiated(self):
         return not (self.cipher is None or self.digest is None or self.digest is None)
 
 
+    def request_publickey(self):
+        logger.info('Sending GET Request to get Public Key')
+        response = requests.get(f'{SERVER_URL}/api/key')
+        server_pubkey = json.loads(response.content.decode('latin'))
+        if server_pubkey != None and 'KEY'  in server_pubkey: 
+            received_key=server_pubkey['KEY'].encode()
+            key = load_pem_public_key(received_key)
+            if isinstance(key, rsa.RSAPublicKey):
+                logger.info('GOT KEY')
+                self.srvr_publickey=key
+            else:
+                logger.info('NOT KEY')
+                
+
     def send_message(self,method):
         #Negotiate algorithms
         data=None
         if self.srvr_publickey: 
-            if method == 'ALG': # TODO: 
+            if method == 'NEGOTIATE_ALG': # TODO: 
                 #if the algorithms have not been negotiated yet
                 if not self.has_negotiated() : 
                     logger.info('Sending POST Request to start negotiating')
                     #Send to the server client's available types of ciphers,digests, and ciphermodes
                     data = {'method':method, 'ciphers':self.ciphers, 'digests':self.digests, 'ciphermodes':self.ciphermodes}
                     request = requests.post(f'{SERVER_URL}/api/protocols',json=data,headers={'Content-Type': 'application/json'})
-                    
-                    return request.text
+                    response=json.loads(request.text)
+                    print(response)
+                    if response['method'] == 'ALG_ERROR':
+                        logger.info('ERROR NEGOTIATING ALGORITHMS')
+                    else:
+                        logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
+
+                        self.cipher,self.digest,self.ciphermode=response['cipher'],response['digest'],response['mode']    
+            elif method == 'EXCHANGE_KEY':
+                key = self.generate_key()
+                data = {'method':method,'key':key}              
+                request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
+                response = request.text
             else:
                 pass
         else:
             # if public key is not known
-            logger.info('Sending GET Request to get Public Key')
-            response = requests.get(f'{SERVER_URL}/api/key')
-            server_pubkey = json.loads(response.content.decode('latin'))
-            if server_pubkey != None and 'KEY'  in server_pubkey: 
-                self.srvr_publickey=server_pubkey['KEY']
-                logger.info('GOT KEY')
+            self.request_publickey()
+
+    
+    
+    
+    
+    def generate_key(self):
+        """
+        Used to generate a ephemeral key to comunicate with the server 
+        """
+        #TODO: random to choose which one to use
+        key_size = self.key_sizes[self.cipher][0]
+        key = os.urandom(key_size)
+
+        return key
+
+
         
     def encrypt_msg(self,message):
         #see what algorithm is been use
@@ -87,7 +123,8 @@ def main():
     #if req:
         #print(req.content)
     client.send_message(None)
-    print(client.send_message('ALG'))
+    client.send_message('NEGOTIATE_ALG')
+    client.send_message('EXCHANGE_KEY')
 
     # client or server sends the algorithms to be used and the other sends the response (encoded with public?)
 
