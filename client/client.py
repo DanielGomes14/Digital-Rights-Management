@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key, l
 from cryptography.hazmat.backends import default_backend  
 from cryptography.hazmat.primitives.asymmetric import rsa  
 from cryptography.hazmat.primitives import serialization  
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric import utils
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -71,6 +73,10 @@ class Client:
             elif method == 'EXCHANGE_KEY':
                 logger.info('Sending POST Request to start exchanging a common key')
                 key = self.generate_key().decode('latin')
+                
+                
+                ciphertext = self.srvr_publickey.encrypt(key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+                
                 data = {'method':method,'key':key}            
                 request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
                 response=json.loads(request.text)
@@ -102,10 +108,19 @@ class Client:
         
     def encrypt_msg(self,message):
         #see what algorithm is been use
+        cipher = None
         if self.cipher == '3DES':
             pass    
         elif self.cipher == 'AES':
+            iv=os.urandom()
+            cipher = Cipher(algorithms.AES(self.srvr_publickey), modes.CBC(iv))
+            encryptor = cipher.encryptor()
+            ct = encryptor.update(b"a secret message")
+            #cipher = Cipher(algorithms.AES(se), modes.CBC(iv))
+        elif self.cipher == 'ChaCha20':
             pass
+            
+            
         return message
 
 
