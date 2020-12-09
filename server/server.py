@@ -3,6 +3,8 @@
 from twisted.web import server, resource
 from twisted.internet import reactor, defer
 from cryptography.hazmat.backends.interfaces import RSABackend
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, rsa
 from cryptography.hazmat.primitives import serialization  
@@ -76,7 +78,7 @@ class MediaServer(resource.Resource):
     # Send a media chunk to the client
     def do_download(self, request):
         logger.debug(f'Download: args: {request.args}')
-        
+        C
         media_id = request.args.get(b'id', [None])[0]
         logger.debug(f'Download: id: {media_id}')
 
@@ -174,7 +176,7 @@ class MediaServer(resource.Resource):
         logger.debug('Generated keys and parameters with sucess')
         #print(parameter_num.g, parameter_num.p)
         pub_key=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-        data = {'method':'EXCHANGE_KEY','p':parameter_num.p,'g':parameter_num.g,'pub_key':pub_key}
+        data = {'method':'DH_START','p':parameter_num.p,'g':parameter_num.g,'pub_key':pub_key}
         
         print(pub_key)
         return self.send_message(data)
@@ -201,14 +203,19 @@ class MediaServer(resource.Resource):
         return self.send_message(message)
         
     
-    def key_exchange(self,data):
-        
-        if 'key' in data:
-            # dar decrypt
-            self.key = data['key']
-            return self.send_message('EXCHANGE_KEY')     
-        
-        return self.send_error_message('EXCHANGE_KEY')
+    def dh_exchange_key(self,request):
+        data= json.loads(request.content.getvalue())
+        method=data['method']
+        if method =='KEY_EXCHANGE':
+            logger.debug('Confirmed the exchange of a key')
+            received_key=data['pub_key'].encode()
+            self.client_pubkey=load_pem_public_key(received_key)
+            self.shared_key = self.private_key.exchange(self.client_pubkey)
+            message = {'method':'ACK'}
+            return self.send_message(message)
+
+        logger.debug('Could not exchange a key. oof')
+        return self.send_error_message('NACK')
         
 
         
@@ -218,7 +225,7 @@ class MediaServer(resource.Resource):
         method=data['method']
         if method == 'NEGOTIATE_ALG':
             return self.negotiate_alg(data)
-        elif method == 'EXCHANGE_KEY':
+        elif method == 'DH_START':
             return self.key_exchange(data)
 
         
@@ -264,8 +271,8 @@ class MediaServer(resource.Resource):
                 return self.do_post_protocols(request)
 
             elif request.uri == b'/api/key':
-
-                return self.do_post_protocols(request)
+                
+                return self.dh_exchange_key(request)
 
         except Exception as e:
             logger.exception(e)
