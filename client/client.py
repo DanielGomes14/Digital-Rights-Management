@@ -13,6 +13,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization  
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import utils
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF    
+
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -33,7 +37,9 @@ class Client:
         self.digest = None
         self.ciphermode = None
         self.key_sizes = {'3DES':[64,128,192],'AES':[128,192,256],'ChaCha20':[256]}
-        
+        self.dh_parameters = None
+
+
     def has_negotiated(self):
         return not (self.cipher is None or self.digest is None or self.digest is None)
 
@@ -55,7 +61,7 @@ class Client:
     def send_message(self,method):
         #Negotiate algorithms
         data=None
-        if self.srvr_publickey: 
+        if not self.srvr_publickey: 
             if method == 'NEGOTIATE_ALG': # TODO: 
                 #if the algorithms have not been negotiated yet
                 if not self.has_negotiated() : 
@@ -71,19 +77,20 @@ class Client:
 
                         self.cipher,self.digest,self.ciphermode=response['cipher'],response['digest'],response['mode']    
             elif method == 'EXCHANGE_KEY':
-                logger.info('Sending POST Request to start exchanging a common key')
-                key = self.generate_key().decode('latin')
-                
-                
-                ciphertext = self.srvr_publickey.encrypt(key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
-                
-                data = {'method':method,'key':key}            
-                request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
-                response=json.loads(request.text)
-                if response['method']== 'KEY_ERROR':
-                    logger.info('COULD NOT EXCHANGE A KEY')
-                else:
-                    logger.info('EXCHANGED KEY WITH SUCESS')
+                logger.info('Sending POST Request to Start DH')
+                if not self.dh_parameters:
+                    response = requests.get(f'{SERVER_URL}/api/key')
+                    logger.info('Received parameters and Public Key with sucess')
+                    data = json.loads(response.text)
+                    p = data['p']
+                    g = data['g']
+                    pn= dh.DHParameterNumbers(p,g)
+                    self.dh_parameters = pn.parameters()
+                    self.private_key = self.dh_parameters.generate_private_key()
+                    self.public_key = self.private_key.public_key()
+                    received_key=data['pub_key'].encode()
+                    self.srvr_publickey=load_pem_public_key(received_key)
+                    print(self.srvr_publickey)
             else:
                 pass
         else:
@@ -92,6 +99,9 @@ class Client:
 
     
     
+    def dh_key_gen(self):
+        if self.parameters is not None:
+            pass
     
     
     def generate_key(self):
@@ -141,7 +151,6 @@ def main():
     #req = requests.get(f'{SERVER_URL}/api/key')
     #if req:
         #print(req.content)
-    client.send_message(None)
     client.send_message('NEGOTIATE_ALG')
     client.send_message('EXCHANGE_KEY')
 

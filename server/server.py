@@ -6,6 +6,9 @@ from cryptography.hazmat.backends.interfaces import RSABackend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, rsa
 from cryptography.hazmat.primitives import serialization  
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import logging
 import binascii
 import json
@@ -40,8 +43,9 @@ class MediaServer(resource.Resource):
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
-        self.public_key,self.private = self.keygen()
-
+        self.public_key,self.private = None,None
+        
+        self.dh_parameters = None
         
     # Send the list of media files to clients
     def do_list(self, request):
@@ -136,16 +140,14 @@ class MediaServer(resource.Resource):
         print(request.content)
 
 
-    def send_message(self,method):
-        message = None
-        if method == 'NEGOTIATE_ALG':
-            data = {'method': 'ALG_OK','cipher':self.cipher,'mode':self.mode,'digest':self.digest}
-            message = json.dumps(data).encode('latin')
-        elif method == 'EXCHANGE_KEY':
-            data= {'method': 'KEY_OK'}
-            message = json.dumps(data).encode('latin')
+    def send_message(self,message):
+        """ Encodes messages """
+
+        if self.public_key:
+            pass
+        message = json.dumps(message).encode('latin')
         return message
-    
+
     def send_error_message(self,method):
         message=None
         if method=='NEGOTIATE_ALG':
@@ -156,40 +158,48 @@ class MediaServer(resource.Resource):
             message = json.dumps(data).encode('latin')
         return message
     
+    
 
-    def keygen(self):
+    def dh_key_gen(self):
         """
-        Generates a keypair using the cryptography lib and returns a tuple (public_key, private_key)
+        Generates the parameters necessary to start the Diffie-Hellman Algorithm
+        along with the server private and public key.
+        After that sends to client parameters and pub_key
         """
-        private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048)
-        public_key = private_key.public_key()
+        logger.debug('Generating parameters and keys...')
+        self.dh_parameters = dh.generate_parameters(generator=2, key_size=1024)
+        self.private_key = self.dh_parameters.generate_private_key()
+        self.public_key = self.private_key.public_key()
+        parameter_num = self.dh_parameters.parameter_numbers()
+        logger.debug('Generated keys and parameters with sucess')
+        #print(parameter_num.g, parameter_num.p)
+        pub_key=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+        data = {'method':'EXCHANGE_KEY','p':parameter_num.p,'g':parameter_num.g,'pub_key':pub_key}
         
-        
-        #print(pem)
-        return (public_key,private_key)
+        print(pub_key)
+        return self.send_message(data)
 
     def negotiate_alg(self,data):
         logger.debug('CHECKING CIPHERS')
-        message=None
         client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
         availableciphers=[c for c in self.ciphers if c in client_ciphers]
         availabledigests=[c for c in  self.digests if c in client_digests]
         availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
         if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
-            logger.error('NO AVAILABLE CIPHERS,DIGESTs OR CIPHERMODES')
-            message=self.send_error_message('NEGOTIATE_ALG')
-        else:
-            # enviar mensagem a dizer q n pode
-            #server chooses the cipher to communicate acordding to client's available ciphers
-            self.cipher = availableciphers[0]
-            self.digest = availabledigests[0]
-            self.mode   = availablemodes[0]
-            print(self.cipher,self.digest,self.mode)
-            logger.debug('Sucess checking ciphers')
-            #enviar 
-            message= self.send_message('NEGOTIATE_ALG')
+            logger.error('NO AVAILABLE CIPHERS,DIGESTS OR CIPHERMODES')
+            return self.send_error_message('NEGOTIATE_ALG')
+    
+        # enviar mensagem a dizer q n pode
+        #server chooses the cipher to communicate acordding to client's available ciphers
+        self.cipher = availableciphers[0]
+        self.digest = availabledigests[0]
+        self.mode   = availablemodes[0]
+        print(self.cipher,self.digest,self.mode)
+        logger.debug('Sucess checking ciphers')
+        #enviar 
+        message = {'method': 'NEGOTIATE_ALG','cipher':self.cipher,'mode':self.mode,'digest':self.digest}
+        return self.send_message(message)
         
-        return message
     
     def key_exchange(self,data):
         
@@ -226,9 +236,7 @@ class MediaServer(resource.Resource):
             elif request.uri == b'/api/key':
             #...chave publica do server
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                pubkey=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-                print(pubkey)
-                return json.dumps({"KEY":pubkey}).encode("latin")
+                return self.dh_key_gen()
             #elif request.uri == 'api/auth':
             #autenticaçao, later on..
             elif request.path == b'/api/list':
