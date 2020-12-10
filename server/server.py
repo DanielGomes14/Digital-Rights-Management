@@ -4,7 +4,8 @@ from twisted.web import server, resource
 from twisted.internet import reactor, defer
 from cryptography.hazmat.backends.interfaces import RSABackend
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
-
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, rsa
 from cryptography.hazmat.primitives import serialization  
@@ -44,7 +45,7 @@ class MediaServer(resource.Resource):
         #self.ciphermodes=[]
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
-        self.ciphermodes = ['CBC','GCM','ECB']
+        self.ciphermodes = ['CBC','GCM','CTR']
         self.public_key,self.private = None,None
         
         self.dh_parameters = None
@@ -137,6 +138,49 @@ class MediaServer(resource.Resource):
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
+
+    def encrypt_message(self,text):
+        iv = os.urandom(16)
+        cipher=None
+        algorithm,iv=None,None
+        mode=None
+        #encryptor = cipher.encryptor()
+        #ct = encryptor.update(b"a secret message") + encryptor.finalize()
+        #decryptor = cipher.decryptor()
+        #decryptor.update(ct) + decryptor.finalize()
+
+        if self.cipher == 'AES':
+            algorithm = algorithms.AES(self.shared_key)
+        elif self.cipher == '3DES':
+            algorithm = algorithms.TripleDES(self.shared_key)
+        elif self.cipher == 'ChaCha20':
+            iv = os.random(16)
+            algorithm = algorithms.ChaCha20(self.shared_key,iv)
+        else:
+            logger.debug('Algorithm not suported')
+        if self.cipher != 'ChaCha20':
+            #with ChaCha20 we do not pad the data
+            iv = os.random(16)
+            
+            if self.mode == 'CBC':
+                mode = modes.CBC(iv)
+            elif self.mode == 'GCM':
+                mode = modes.GCM(iv)
+            elif self.mode == 'CTR':
+                mode = modes.CTR(iv)
+            padder = padding.PKCS7(128).padder()
+            padded_data = padder.update(text)
+            padded_data += padder.finalize()
+                    
+
+        cipher = Cipher(algorithm, mode=mode)    
+        encryptor = cipher.encryptor()
+        cryptogram = encryptor.update(text) + encryptor.finalize()
+
+        return cryptogram, iv
+
+    def decrypt_message(self,cryptogram,iv):
+        pass
     def do_get_protocols(self,request):
         #receber os algoritmos e ver quais é o servidor tem
         print(request.content)
@@ -145,8 +189,11 @@ class MediaServer(resource.Resource):
     def send_message(self,message):
         """ Encodes messages """
 
-        if self.public_key:
-            pass
+        if self.shared_key:        
+            message = self.encrypt_message(message)            
+
+
+
         message = json.dumps(message).encode('latin')
         return message
 
