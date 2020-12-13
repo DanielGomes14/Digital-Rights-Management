@@ -9,14 +9,16 @@ import time
 import sys
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.backends import default_backend  
-from cryptography.hazmat.primitives.asymmetric import rsa  
-from cryptography.hazmat.primitives import serialization  
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import utils
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF    
-
+from cryptography.hazmat.backends.interfaces import RSABackend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import dsa, rsa
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -36,7 +38,7 @@ class Client:
 		self.cipher = None
 		self.digest = None
 		self.ciphermode = None
-		self.key_sizes = {'3DES':[64,128,192],'AES':[128,192,256],'ChaCha20':[256]}
+		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.dh_parameters = None
 
 
@@ -56,7 +58,26 @@ class Client:
 				self.srvr_publickey=key
 			else:
 				logger.info('NOT KEY')
-				
+
+	def dh_start(self,data):
+		p = data['p']
+		g = data['g']
+		pn= dh.DHParameterNumbers(p,g)
+		self.dh_parameters = pn.parameters()
+		self.private_key = self.dh_parameters.generate_private_key()
+		self.public_key = self.private_key.public_key()
+		received_key=data['pub_key'].encode()
+		self.srvr_publickey=load_pem_public_key(received_key)
+		print(self.srvr_publickey)
+
+	def dh_exchange_key(self,data):
+		method=data['method']
+		if method == 'ACK':
+			logger.info('Server confirmed the exchange')
+			self.shared_key = self.private_key.exchange(self.srvr_publickey)
+		else:
+			logger.info('Could not exchange a key with the server')
+
 
 	def send_message(self,method):
 		#Negotiate algorithms
@@ -82,30 +103,14 @@ class Client:
 					response = requests.get(f'{SERVER_URL}/api/key')
 					logger.info('Received parameters and Public Key with sucess')
 					data = json.loads(response.text)
-					p = data['p']
-					g = data['g']
-					pn= dh.DHParameterNumbers(p,g)
-					self.dh_parameters = pn.parameters()
-					self.private_key = self.dh_parameters.generate_private_key()
-					self.public_key = self.private_key.public_key()
-					received_key=data['pub_key'].encode()
-					self.srvr_publickey=load_pem_public_key(received_key)
-					print(self.srvr_publickey)
-                    
+					self.dh_start(data)
+					logger.info('Sending POST Request to exchange DH Shared key')
 					key=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 					data = {'method': 'KEY_EXCHANGE','pub_key': key}
-		
 					request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
 					response= json.loads(request.text)
-					method=response['method']
-					if method == 'ACK':
-						logger.info('Server confirmed the exchange')
-						self.shared_key = self.private_key.exchange(self.srvr_publickey)
-					else:
-						logger.info('Could not exchange a key with the server')
-
-
-
+					self.dh_exchange_key(response)
+					
 			else:
 				pass
 		else:
@@ -147,6 +152,80 @@ class Client:
 			
 			
 		return message
+	
+	def encrypt_message(self,text):
+		iv = os.urandom(16)
+		cipher=None
+		algorithm,iv=None,None
+		mode=None
+		#encryptor = cipher.encryptor()
+		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
+		#decryptor = cipher.decryptor()
+		#decryptor.update(ct) + decryptor.finalize()
+		if self.cipher == 'AES':
+			algorithm = algorithms.AES(self.shared_key)
+		elif self.cipher == '3DES':
+			algorithm = algorithms.TripleDES(self.shared_key)
+		elif self.cipher == 'ChaCha20':
+			iv = os.random(16)
+			algorithm = algorithms.ChaCha20(self.shared_key,iv)
+		else:
+			logger.debug('Algorithm not suported')
+		if self.cipher != 'ChaCha20':
+			#with ChaCha20 we do not pad the data
+			iv = os.random(16)
+			
+			if self.mode == 'CBC':
+				mode = modes.CBC(iv)
+			elif self.mode == 'GCM':
+				mode = modes.GCM(iv)
+			elif self.mode == 'CTR':
+				mode = modes.CTR(iv)
+			padder = padding.PKCS7(self.key_sizes[self.cipher][0]).padder()
+			padded_data = padder.update(text)
+			padded_data += padder.finalize()
+					
+		cipher = Cipher(algorithm, mode=mode)    
+		encryptor = cipher.encryptor()
+		cryptogram = encryptor.update(text) + encryptor.finalize()
+
+		return cryptogram, iv
+
+	def decrypt_message(self,cryptogram,iv):
+		cipher=None
+		algorithm=None
+		mode=None
+		#encryptor = cipher.encryptor()
+		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
+		#decryptor = cipher.decryptor()
+		#decryptor.update(ct) + decryptor.finalize()
+		if self.cipher == 'AES':
+			algorithm = algorithms.AES(self.shared_key)
+		elif self.cipher == '3DES':
+			algorithm = algorithms.TripleDES(self.shared_key)
+		elif self.cipher == 'ChaCha20':
+			if iv!=None:algorithm = algorithms.ChaCha20(self.shared_key,iv)
+		else:
+			logger.debug('Algorithm not suported')
+
+		#with ChaCha20 we do not pad the data
+		if self.mode == 'CBC':
+			mode = modes.CBC(iv)
+		elif self.mode == 'GCM':
+			mode = modes.GCM(iv)
+		elif self.mode == 'CTR':
+			mode = modes.CTR(iv)
+		cipher = Cipher(algorithm, mode=mode)       
+		decryptor = cipher.decryptor()
+		if algorithm == 'ChaCha20': 
+			return decryptor.update(cryptogram) + decryptor.finalize()
+		else:
+			padded_data = decryptor.update(cryptogram) + decryptor.finalize()
+			unpadder = padding.PKCS7(self.key_sizes[self.cipher][0]).unpadder()
+			text = unpadder.update(padded_data)
+			text += unpadder.finalize()
+			return text
+
 
 
 def main():
@@ -168,7 +247,7 @@ def main():
 		#print(req.content)
 	client.send_message('NEGOTIATE_ALG')
 	client.send_message('DH_START')
-    #client.send_message('')
+	#client.send_message('')
 
 	# client or server sends the algorithms to be used and the other sends the response (encoded with public?)
 
@@ -186,7 +265,10 @@ def main():
 	if req.status_code == 200:
 		print("Got Server List")
 
-	media_list = req.json()
+
+	media_list = client.decrypt_message(req.content)
+	print(media_list)
+ 	#media_list = req.json()
 
 
 

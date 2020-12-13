@@ -46,8 +46,9 @@ class MediaServer(resource.Resource):
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','CTR']
+        self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
         self.public_key,self.private = None,None
-        
+        self.shared_key=None
         self.dh_parameters = None
         
     # Send the list of media files to clients
@@ -73,13 +74,13 @@ class MediaServer(resource.Resource):
 
         # Return list to client
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-        return json.dumps(media_list, indent=4).encode('latin')
+        return self.encrypt_message(json.dumps(media_list).encode('latin'))
+        #return json.dumps(media_list, indent=4).encode('latin')
 
 
     # Send a media chunk to the client
     def do_download(self, request):
         logger.debug(f'Download: args: {request.args}')
-        C
         media_id = request.args.get(b'id', [None])[0]
         logger.debug(f'Download: id: {media_id}')
 
@@ -140,27 +141,31 @@ class MediaServer(resource.Resource):
 
 
     def encrypt_message(self,text):
-        iv = os.urandom(16)
+        logger.debug("aaaaaaaaaaa",text)
+        logger.debug(text)
         cipher=None
         algorithm,iv=None,None
         mode=None
+        size=self.key_sizes[self.cipher][0]
+        enc_shared_key=self.shared_key[:size//8]
+        logger.debug('Starting encription')
+        print(len(enc_shared_key))
         #encryptor = cipher.encryptor()
         #ct = encryptor.update(b"a secret message") + encryptor.finalize()
         #decryptor = cipher.decryptor()
         #decryptor.update(ct) + decryptor.finalize()
-
         if self.cipher == 'AES':
-            algorithm = algorithms.AES(self.shared_key)
+            algorithm = algorithms.AES(enc_shared_key)
         elif self.cipher == '3DES':
-            algorithm = algorithms.TripleDES(self.shared_key)
+            algorithm = algorithms.TripleDES(enc_shared_key)
         elif self.cipher == 'ChaCha20':
-            iv = os.random(16)
-            algorithm = algorithms.ChaCha20(self.shared_key,iv)
+            iv = os.urandom(16)
+            algorithm = algorithms.ChaCha20(enc_shared_key,iv)
         else:
             logger.debug('Algorithm not suported')
         if self.cipher != 'ChaCha20':
             #with ChaCha20 we do not pad the data
-            iv = os.random(16)
+            iv = os.urandom(16)
             
             if self.mode == 'CBC':
                 mode = modes.CBC(iv)
@@ -168,19 +173,57 @@ class MediaServer(resource.Resource):
                 mode = modes.GCM(iv)
             elif self.mode == 'CTR':
                 mode = modes.CTR(iv)
-            padder = padding.PKCS7(128).padder()
+            logger.debug("oof")
+
+            padder = padding.PKCS7(32).padder()
             padded_data = padder.update(text)
             padded_data += padder.finalize()
+            print(padded_data)
                     
 
-        cipher = Cipher(algorithm, mode=mode)    
+        cipher = Cipher(algorithm, mode=mode)  
         encryptor = cipher.encryptor()
         cryptogram = encryptor.update(text) + encryptor.finalize()
 
         return cryptogram, iv
 
     def decrypt_message(self,cryptogram,iv):
-        pass
+        cipher=None
+        algorithm=None
+        mode=None
+        #encryptor = cipher.encryptor()
+        #ct = encryptor.update(b"a secret message") + encryptor.finalize()
+        #decryptor = cipher.decryptor()
+        #decryptor.update(ct) + decryptor.finalize()
+        if self.cipher == 'AES':
+            algorithm = algorithms.AES(self.shared_key)
+        elif self.cipher == '3DES':
+            algorithm = algorithms.TripleDES(self.shared_key)
+        elif self.cipher == 'ChaCha20':
+            if iv!=None:algorithm = algorithms.ChaCha20(self.shared_key,iv)
+        else:
+            logger.debug('Algorithm not suported')
+
+        #with ChaCha20 we do not pad the data
+        if self.mode == 'CBC':
+            mode = modes.CBC(iv)
+        elif self.mode == 'GCM':
+            mode = modes.GCM(iv)
+        elif self.mode == 'CTR':
+            mode = modes.CTR(iv)
+
+        cipher = Cipher(algorithm, mode=mode)       
+
+        decryptor = cipher.decryptor()
+        if algorithm == 'ChaCha20': return decryptor.update(cryptogram) + decryptor.finalize()
+        else:
+            padded_data = decryptor.update(cryptogram) + decryptor.finalize()
+            unpadder = padding.PKCS7(self.key_sizes[self.cipher][0]).unpadder()
+            text = unpadder.update(padded_data)
+            text += unpadder.finalize()
+            return text
+
+
     def do_get_protocols(self,request):
         #receber os algoritmos e ver quais é o servidor tem
         print(request.content)
@@ -190,11 +233,10 @@ class MediaServer(resource.Resource):
         """ Encodes messages """
 
         if self.shared_key:        
-            message = self.encrypt_message(message)            
+            message = self.encrypt_message(json.dumps(message).encode('latin'))            
 
-
-
-        message = json.dumps(message).encode('latin')
+        else:
+            message = json.dumps(message).encode('latin')
         return message
 
     def send_error_message(self,method):
@@ -299,7 +341,6 @@ class MediaServer(resource.Resource):
             elif request.path == b'/api/download':
                 return self.do_download(request)
             else:
-                print("fds")
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
                 return b'Methods: /api/protocols /api/list /api/download'
 
