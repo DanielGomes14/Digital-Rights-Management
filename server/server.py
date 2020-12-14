@@ -71,11 +71,14 @@ class MediaServer(resource.Resource):
                 'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
                 'duration': media['duration']
                 })
-
+        #print(type(media_list[0]['id']))
         # Return list to client
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-        return self.encrypt_message(json.dumps(media_list).encode('latin'))
-        #return json.dumps(media_list, indent=4).encode('latin')
+        cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'))
+        #print(type(cryptogram.decode('latin')))
+        data= {'method':'SERVERLIST','cryptogram':cryptogram.decode('latin'),'iv':iv.decode('latin')}
+        print(type(data))
+        return json.dumps(data, indent=4).encode('latin')
 
 
     # Send a media chunk to the client
@@ -141,8 +144,8 @@ class MediaServer(resource.Resource):
 
 
     def encrypt_message(self,text):
-        logger.debug("aaaaaaaaaaa",text)
-        logger.debug(text)
+        #logger.debug("aaaaaaaaaaa",text)
+        #logger.debug(text)
         cipher=None
         algorithm,iv=None,None
         mode=None
@@ -173,8 +176,6 @@ class MediaServer(resource.Resource):
                 mode = modes.GCM(iv)
             elif self.mode == 'CTR':
                 mode = modes.CTR(iv)
-            logger.debug("oof")
-
             padder = padding.PKCS7(algorithm.block_size).padder()
             padded_data = padder.update(text)
             padded_data += padder.finalize()
@@ -183,9 +184,9 @@ class MediaServer(resource.Resource):
 
         cipher = Cipher(algorithm, mode=mode)  
         encryptor = cipher.encryptor()
-        print(len(text))
+        #print(len(text))
         cryptogram = encryptor.update(text) + encryptor.finalize()
-
+        #logger.debug(cryptogram,iv)
         return cryptogram, iv
 
     def decrypt_message(self,cryptogram,iv):
@@ -233,11 +234,11 @@ class MediaServer(resource.Resource):
     def send_message(self,message):
         """ Encodes messages """
 
-        if self.shared_key:        
-            message = self.encrypt_message(json.dumps(message).encode('latin'))            
-
-        else:
-            message = json.dumps(message).encode('latin')
+        #if self.shared_key:        
+            #message = self.encrypt_message(json.dumps(message).encode('latin'))            
+            #pass
+        #else:
+        message = json.dumps(message).encode('latin')
         return message
 
     def send_error_message(self,method):
@@ -337,7 +338,10 @@ class MediaServer(resource.Resource):
             #elif request.uri == 'api/auth':
             #autenticaçao, later on..
             elif request.path == b'/api/list':
-                return self.do_list(request)
+                #request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                a=self.do_list(request)
+                logger.debug('finished encryption')
+                return a
 
             elif request.path == b'/api/download':
                 return self.do_download(request)

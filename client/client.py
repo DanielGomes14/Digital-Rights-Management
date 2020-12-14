@@ -108,6 +108,7 @@ class Client:
 					key=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 					data = {'method': 'KEY_EXCHANGE','pub_key': key}
 					request = requests.post(f'{SERVER_URL}/api/key',json=data,headers={'Content-Type': 'application/json'})
+					logger.debug("test...")
 					response= json.loads(request.text)
 					self.dh_exchange_key(response)
 					
@@ -175,11 +176,11 @@ class Client:
 			#with ChaCha20 we do not pad the data
 			iv = os.random(16)
 			
-			if self.mode == 'CBC':
+			if self.ciphermode == 'CBC':
 				mode = modes.CBC(iv)
-			elif self.mode == 'GCM':
+			elif self.ciphermode == 'GCM':
 				mode = modes.GCM(iv)
-			elif self.mode == 'CTR':
+			elif self.ciphermode == 'CTR':
 				mode = modes.CTR(iv)
 			padder = padding.PKCS7(self.key_sizes[self.cipher][0]).padder()
 			padded_data = padder.update(text)
@@ -195,36 +196,40 @@ class Client:
 		cipher=None
 		algorithm=None
 		mode=None
+		size=self.key_sizes[self.cipher][0]
+		enc_shared_key=self.shared_key[:size//8]
+		iv=iv.encode('latin')
+		cryptogram=cryptogram.encode('latin')
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
 		#decryptor.update(ct) + decryptor.finalize()
 		if self.cipher == 'AES':
-			algorithm = algorithms.AES(self.shared_key)
+			algorithm = algorithms.AES(enc_shared_key)
 		elif self.cipher == '3DES':
-			algorithm = algorithms.TripleDES(self.shared_key)
+			algorithm = algorithms.TripleDES(enc_shared_key)
 		elif self.cipher == 'ChaCha20':
-			if iv!=None:algorithm = algorithms.ChaCha20(self.shared_key,iv)
+			if iv!=None:algorithm = algorithms.ChaCha20(enc_shared_key)
 		else:
 			logger.debug('Algorithm not suported')
 
 		#with ChaCha20 we do not pad the data
-		if self.mode == 'CBC':
+		if self.ciphermode == 'CBC':
 			mode = modes.CBC(iv)
-		elif self.mode == 'GCM':
+		elif self.ciphermode == 'GCM':
 			mode = modes.GCM(iv)
-		elif self.mode == 'CTR':
+		elif self.ciphermode == 'CTR':
 			mode = modes.CTR(iv)
 		cipher = Cipher(algorithm, mode=mode)       
 		decryptor = cipher.decryptor()
 		if algorithm == 'ChaCha20': 
 			return decryptor.update(cryptogram) + decryptor.finalize()
 		else:
-			padded_data = decryptor.update(cryptogram) + decryptor.finalize()
-			unpadder = padding.PKCS7(self.key_sizes[self.cipher][0]).unpadder()
+			padded_data = decryptor.update(cryptogram) + decryptor.finalize()	
+			unpadder = padding.PKCS7(algorithm.block_size).unpadder()
 			text = unpadder.update(padded_data)
 			text += unpadder.finalize()
-			return text
+			return list(json.loads(text.decode('latin')))
 
 
 
@@ -264,9 +269,10 @@ def main():
 	req = requests.get(f'{SERVER_URL}/api/list')
 	if req.status_code == 200:
 		print("Got Server List")
-
-
-	media_list = client.decrypt_message(req.content)
+	data=json.loads(req.text)
+	cryptogram=data['cryptogram']
+	iv = data['iv']
+	media_list = client.decrypt_message(cryptogram,iv)
 	print(media_list)
  	#media_list = req.json()
 
