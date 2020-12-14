@@ -149,13 +149,13 @@ class MediaServer(resource.Resource):
         size=self.key_sizes[self.cipher][0]
         enc_shared_key=self.shared_key[:size//8]
         logger.debug('Starting encription')
-        print(len(enc_shared_key))
         #encryptor = cipher.encryptor()
         #ct = encryptor.update(b"a secret message") + encryptor.finalize()
         #decryptor = cipher.decryptor()
         #decryptor.update(ct) + decryptor.finalize()
         if self.cipher == 'AES':
             algorithm = algorithms.AES(enc_shared_key)
+
         elif self.cipher == '3DES':
             algorithm = algorithms.TripleDES(enc_shared_key)
         elif self.cipher == 'ChaCha20':
@@ -175,14 +175,15 @@ class MediaServer(resource.Resource):
                 mode = modes.CTR(iv)
             logger.debug("oof")
 
-            padder = padding.PKCS7(32).padder()
+            padder = padding.PKCS7(algorithm.block_size).padder()
             padded_data = padder.update(text)
             padded_data += padder.finalize()
-            print(padded_data)
+            text=padded_data
                     
 
         cipher = Cipher(algorithm, mode=mode)  
         encryptor = cipher.encryptor()
+        print(len(text))
         cryptogram = encryptor.update(text) + encryptor.finalize()
 
         return cryptogram, iv
