@@ -7,6 +7,7 @@ import random
 import subprocess
 import time
 import sys
+import base64
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.backends import default_backend  
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -15,10 +16,11 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF    
-from cryptography.hazmat.backends.interfaces import RSABackend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import dsa, rsa
+from cryptography.hazmat.primitives import hashes, hmac
+
+
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -198,8 +200,6 @@ class Client:
 		mode=None
 		size=self.key_sizes[self.cipher][0]
 		enc_shared_key=self.shared_key[:size//8]
-		iv=iv.encode('latin')
-		cryptogram=cryptogram.encode('latin')
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
@@ -229,8 +229,37 @@ class Client:
 			unpadder = padding.PKCS7(algorithm.block_size).unpadder()
 			text = unpadder.update(padded_data)
 			text += unpadder.finalize()
-			return list(json.loads(text.decode('latin')))
+			return text
 
+	def add_hmac(self,message):
+		msg_bytes=None
+		if self.digest == 'SHA-512':
+			h = hmac.HMAC(self.shared_key, hashes.SHA512())
+			h.update(message)
+			msg_bytes = h.finalize() 
+		elif self.digest == 'SHA-256':
+			h = hmac.HMAC(key, hashes.SHA256())
+			h.update(message)
+			msg_bytes = h.finalize() 
+		return msg_bytes
+
+
+	def verify_hmac(self,recv_hmac,crypto):
+		h=None
+		digest=None
+		if self.digest == 'SHA-512':
+			digest=hashes.SHA512()
+		elif self.digest == 'SHA-256':
+			digest = hashes.SHA256()
+		size=self.key_sizes[self.cipher][0]
+		h = hmac.HMAC(self.shared_key[:size//8],digest)
+		h.update(crypto)
+		try:
+			h.verify(recv_hmac)
+			return True
+		except:
+			logger.info("HMAC Wrong. Communications will not continue")
+			return False 
 
 
 def main():
@@ -261,20 +290,23 @@ def main():
 	# client generates simetric key and sends it encrypted with server public key 
 	
 
-
 	# validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
-
-	
 	
 	req = requests.get(f'{SERVER_URL}/api/list')
 	if req.status_code == 200:
 		print("Got Server List")
 	data=json.loads(req.text)
-	cryptogram=data['cryptogram']
-	iv = data['iv']
-	media_list = client.decrypt_message(cryptogram,iv)
+	cryptogram=base64.b64decode(data['cryptogram'])
+	iv = base64.b64decode(data['iv'])
+	hmac=base64.b64decode(data['hmac'])
+	logger.info("verifying hmac..")
+	verif=client.verify_hmac(hmac,cryptogram)
+	if verif:
+		logger.info("Hmac is good to go")
+
+	media_list = json.loads(client.decrypt_message(cryptogram,iv))
 	print(media_list)
- 	#media_list = req.json()
+	#media_list = req.json()
 
 
 
