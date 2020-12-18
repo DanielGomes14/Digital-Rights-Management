@@ -46,7 +46,7 @@ class Client:
 
 
 	def has_negotiated(self):
-		return not (self.cipher is None or self.digest is None or self.digest is None)
+		return not (self.cipher is None or self.digest is None)
 
 
 	def request_publickey(self):
@@ -140,22 +140,7 @@ class Client:
 
 
 		
-	def encrypt_msg(self,message):
-		#see what algorithm is been use
-		cipher = None
-		if self.cipher == '3DES':
-			pass    
-		elif self.cipher == 'AES':
-			iv=os.urandom()
-			cipher = Cipher(algorithms.AES(self.srvr_publickey), modes.CBC(iv))
-			encryptor = cipher.encryptor()
-			ct = encryptor.update(b"a secret message")
-			#cipher = Cipher(algorithms.AES(se), modes.CBC(iv))
-		elif self.cipher == 'ChaCha20':
-			pass
-			
-			
-		return message
+	
 	
 	def encrypt_message(self,text):
 		iv = os.urandom(16)
@@ -212,7 +197,8 @@ class Client:
 		elif self.cipher == '3DES':
 			algorithm = algorithms.TripleDES(enc_shared_key)
 		elif self.cipher == 'ChaCha20':
-			if iv!=None:algorithm = algorithms.ChaCha20(enc_shared_key)
+			#in this case the nonce is the iv
+			if iv!=None:algorithm = algorithms.ChaCha20(enc_shared_key,iv)
 		else:
 			logger.debug('Algorithm not suported')
 
@@ -225,7 +211,7 @@ class Client:
 			mode = modes.CTR(iv)
 		cipher = Cipher(algorithm, mode=mode)       
 		decryptor = cipher.decryptor()
-		if algorithm == 'ChaCha20': 
+		if self.cipher == 'ChaCha20': 
 			return decryptor.update(cryptogram) + decryptor.finalize()
 		else:
 			padded_data = decryptor.update(cryptogram) + decryptor.finalize()	
@@ -270,7 +256,9 @@ class Client:
 		)
 		key = kdf.derive(data)
 		#key = key^self.shared_key
+	
 		key=bytes(a ^ b for a, b in zip(key, self.shared_key))
+		
 		return key,salt
 
 
@@ -381,7 +369,7 @@ def main():
 
 		chunk = req.json()
 		
-		data=base64.b64decode(chunk['data'])
+		data= binascii.a2b_base64(chunk['data'].encode('latin'))
 		iv,salt=base64.b64decode(chunk['iv']),base64.b64decode(chunk['salt'])
 		hmac=base64.b64decode(chunk['hmac'])
 		key,salt=client.derive_key(client.chunk_identification(chunk['chunk'],chunk['media_id']),salt)

@@ -47,7 +47,7 @@ class MediaServer(resource.Resource):
 		#self.ciphers=[]
 		#self.digests=[]
 		#self.ciphermodes=[]
-		self.ciphers = ['AES','3DES','ChaCha20']
+		self.ciphers = ['ChaCha20','3DES','AES']
 		self.digests = ['SHA-512','SHA-256','SHA-384']
 		self.ciphermodes = ['CBC','GCM','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
@@ -146,7 +146,7 @@ class MediaServer(resource.Resource):
 					{
 						'media_id': media_id, 
 						'chunk': chunk_id, 
-						'data': base64.b64encode(data).decode('latin'),
+						'data': binascii.b2a_base64(data).decode('latin').strip(),
 						'iv': base64.b64encode(iv).decode('latin'),
 						'salt': base64.b64encode(salt).decode('latin'),
 						'hmac': base64.b64encode(self.add_hmac(data,key)).decode('latin')
@@ -169,6 +169,7 @@ class MediaServer(resource.Resource):
 		size=self.key_sizes[self.cipher][0]
 		enc_shared_key=key[:size//8]
 		logger.debug('Starting encription')
+		print("vamos ver ",len(enc_shared_key))
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
@@ -185,7 +186,7 @@ class MediaServer(resource.Resource):
 			logger.debug('Algorithm not suported')
 		if self.cipher != 'ChaCha20':
 			#with ChaCha20 we do not pad the data
-			iv = os.urandom(16)
+			iv = os.urandom(algorithm.block_size // 8)
 			
 			if self.mode == 'CBC':
 				mode = modes.CBC(iv)
@@ -274,13 +275,15 @@ class MediaServer(resource.Resource):
 		# derive
 		kdf = PBKDF2HMAC(
 			algorithm=digest,
-			length=32,
+			length=128,
 			salt=salt,
 			iterations=100000,
 		)
 		key = kdf.derive(data)
 		#key = key^self.shared_key
+		print("-_>",len(key),len(self.shared_key),len(data))
 		key=bytes(a ^ b for a, b in zip(key, self.shared_key))
+		print("--->",len(key))
 		return key,salt
 
 
@@ -347,7 +350,8 @@ class MediaServer(resource.Resource):
 		#server chooses the cipher to communicate acordding to client's available ciphers
 		self.cipher = availableciphers[0]
 		self.digest = availabledigests[0]
-		self.mode   = availablemodes[0]
+		self.mode=None
+		if self.cipher!='ChaCha20': self.mode   = availablemodes[0] 
 		print(self.cipher,self.digest,self.mode)
 		logger.debug('Sucess checking ciphers')
 		#enviar 
