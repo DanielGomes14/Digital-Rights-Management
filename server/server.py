@@ -5,6 +5,7 @@ from twisted.internet import reactor, defer
 from cryptography.hazmat.backends.interfaces import RSABackend
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, rsa
@@ -47,7 +48,7 @@ class MediaServer(resource.Resource):
 		#self.digests=[]
 		#self.ciphermodes=[]
 		self.ciphers = ['AES','3DES','ChaCha20']
-		self.digests = ['SHA-256','SHA-384','SHA-512']
+		self.digests = ['SHA-512','SHA-256','SHA-384']
 		self.ciphermodes = ['CBC','GCM','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.public_key,self.private = None,None
@@ -79,7 +80,7 @@ class MediaServer(resource.Resource):
 		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 		cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'))
 		hmac=self.add_hmac(cryptogram)
-		print(hmac)
+		print(len(hmac))
 		#print(type(cryptogram.decode('latin')))
 		crypto = base64.b64encode(cryptogram).decode('latin')
 		iv = base64.b64encode(iv).decode('latin')
@@ -137,12 +138,19 @@ class MediaServer(resource.Resource):
 			data = f.read(CHUNK_SIZE)
 
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+			key,salt=self.derive_key(self.chunk_identification(chunk_id,media_id))
+			data,iv=self.encrypt_message(data,key)
+			print(len(iv))
+			#binascii.b2a_base64(data).decode('latin').strip(),
 			return json.dumps(
 					{
 						'media_id': media_id, 
 						'chunk': chunk_id, 
-						'data': binascii.b2a_base64(data).decode('latin').strip()
-					},indent=4
+						'data': base64.b64encode(data).decode('latin'),
+						'iv': base64.b64encode(iv).decode('latin'),
+						'salt': base64.b64encode(salt).decode('latin'),
+						'hmac': base64.b64encode(self.add_hmac(data,key)).decode('latin')
+					},indent=4	
 				).encode('latin')
 
 		# File was not open?
@@ -150,14 +158,16 @@ class MediaServer(resource.Resource):
 		return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
 
-	def encrypt_message(self,text):
+	def encrypt_message(self,text,key=None):
 		#logger.debug("aaaaaaaaaaa",text)
 		#logger.debug(text)
+		if key==None:
+			key = self.shared_key
 		cipher=None
 		algorithm,iv=None,None
 		mode=None
 		size=self.key_sizes[self.cipher][0]
-		enc_shared_key=self.shared_key[:size//8]
+		enc_shared_key=key[:size//8]
 		logger.debug('Starting encription')
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
@@ -196,10 +206,12 @@ class MediaServer(resource.Resource):
 		#logger.debug(cryptogram,iv)
 		return cryptogram, iv
 
-	def add_hmac(self,message):
+	def add_hmac(self,message,key=None):
+		if key == None:
+			key=self.shared_key
 		msg_bytes=None
 		size=self.key_sizes[self.cipher][0]
-		enc_shared_key=self.shared_key[:size//8]
+		enc_shared_key=key[:size//8]
 		if self.digest == 'SHA-512':
 			h = hmac.HMAC(enc_shared_key, hashes.SHA512())
 			h.update(message)
@@ -247,6 +259,29 @@ class MediaServer(resource.Resource):
 			text += unpadder.finalize()
 			return text
 
+	def chunk_identification(self,chunk_id,media_id):
+		media_id=media_id.encode('latin')
+		chunk_id=str(chunk_id).encode('latin')
+		return bytes(a ^ b for a, b in zip(chunk_id, media_id))
+
+	def derive_key(self,data):
+		digest=None
+		if self.digest == 'SHA-512':
+			digest = hashes.SHA512()
+		elif self.digest == 'SHA-256':
+			digest =hashes.SHA256()
+		salt = os.urandom(16)
+		# derive
+		kdf = PBKDF2HMAC(
+			algorithm=digest,
+			length=32,
+			salt=salt,
+			iterations=100000,
+		)
+		key = kdf.derive(data)
+		#key = key^self.shared_key
+		key=bytes(a ^ b for a, b in zip(key, self.shared_key))
+		return key,salt
 
 
 

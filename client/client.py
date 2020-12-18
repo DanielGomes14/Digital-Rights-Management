@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
 
@@ -34,7 +35,7 @@ class Client:
 		"""Representation of the client."""
 
 		self.ciphers = ['AES','3DES','ChaCha20']
-		self.digests = ['SHA-256','SHA-512']
+		self.digests = ['SHA-512','SHA-256']
 		self.ciphermodes = ['CBC','CTR','GCM']
 		self.srvr_publickey =None
 		self.cipher = None
@@ -194,12 +195,14 @@ class Client:
 
 		return cryptogram, iv
 
-	def decrypt_message(self,cryptogram,iv):
+	def decrypt_message(self,cryptogram,iv,key=None):
+		if key==None:
+			key = self.shared_key
 		cipher=None
 		algorithm=None
 		mode=None
 		size=self.key_sizes[self.cipher][0]
-		enc_shared_key=self.shared_key[:size//8]
+		enc_shared_key=key[:size//8]
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
@@ -231,10 +234,12 @@ class Client:
 			text += unpadder.finalize()
 			return text
 
-	def add_hmac(self,message):
+	def add_hmac(self,message,key=None):
+		if key==None:
+			key = self.shared_key
 		msg_bytes=None
 		if self.digest == 'SHA-512':
-			h = hmac.HMAC(self.shared_key, hashes.SHA512())
+			h = hmac.HMAC(key, hashes.SHA512())
 			h.update(message)
 			msg_bytes = h.finalize() 
 		elif self.digest == 'SHA-256':
@@ -244,7 +249,35 @@ class Client:
 		return msg_bytes
 
 
-	def verify_hmac(self,recv_hmac,crypto):
+	def chunk_identification(self,chunk_id,media_id):
+		media_id=media_id.encode('latin')
+		chunk_id=str(chunk_id).encode('latin')
+		return bytes(a ^ b for a, b in zip(chunk_id, media_id))
+
+	def derive_key(self,data,salt):
+		digest=None
+		if self.digest == 'SHA-512':
+			digest = hashes.SHA512()
+		elif self.digest == 'SHA-256':
+			digest =hashes.SHA256()
+		
+		# derive
+		kdf = PBKDF2HMAC(
+			algorithm=digest,
+			length=32,
+			salt=salt,
+			iterations=100000,
+		)
+		key = kdf.derive(data)
+		#key = key^self.shared_key
+		key=bytes(a ^ b for a, b in zip(key, self.shared_key))
+		return key,salt
+
+
+
+	def verify_hmac(self,recv_hmac,crypto,key=None):
+		if key==None:
+			key = self.shared_key
 		h=None
 		digest=None
 		if self.digest == 'SHA-512':
@@ -252,7 +285,7 @@ class Client:
 		elif self.digest == 'SHA-256':
 			digest = hashes.SHA256()
 		size=self.key_sizes[self.cipher][0]
-		h = hmac.HMAC(self.shared_key[:size//8],digest)
+		h = hmac.HMAC(key[:size//8],digest)
 		h.update(crypto)
 		try:
 			h.verify(recv_hmac)
@@ -298,14 +331,15 @@ def main():
 	data=json.loads(req.text)
 	cryptogram=base64.b64decode(data['cryptogram'])
 	iv = base64.b64decode(data['iv'])
+	print(len(iv))
 	hmac=base64.b64decode(data['hmac'])
 	logger.info("verifying hmac..")
 	verif=client.verify_hmac(hmac,cryptogram)
 	if verif:
 		logger.info("Hmac is good to go")
-
-	media_list = json.loads(client.decrypt_message(cryptogram,iv))
-	print(media_list)
+		media_list = json.loads(client.decrypt_message(cryptogram,iv))
+	
+	
 	#media_list = req.json()
 
 
@@ -344,14 +378,26 @@ def main():
 	# Get data from server and send it to the ffplay stdin through a pipe
 	for chunk in range(media_item['chunks'] + 1):
 		req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}')
-		chunk = req.json()
-		# TODO: Process chunk
 
-		data = binascii.a2b_base64(chunk['data'].encode('latin'))
-		try:
-			proc.stdin.write(data)
-		except:
-			break
+		chunk = req.json()
+		
+		data=base64.b64decode(chunk['data'])
+		iv,salt=base64.b64decode(chunk['iv']),base64.b64decode(chunk['salt'])
+		hmac=base64.b64decode(chunk['hmac'])
+		key,salt=client.derive_key(client.chunk_identification(chunk['chunk'],chunk['media_id']),salt)
+		verif=client.verify_hmac(hmac,data,key)
+		if verif:
+			logger.info("good to go.gg")
+			data=client.decrypt_message(data,iv,key)
+			# TODO: Process chunk
+			logger.info(data)
+			#data = binascii.a2b_base64(data)
+			try:
+				proc.stdin.write(data)
+			except:
+				break
+		else:
+			logger.info("Ardeu mpt")
 
 if __name__ == '__main__':
 
