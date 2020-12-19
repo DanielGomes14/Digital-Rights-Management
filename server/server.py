@@ -52,6 +52,7 @@ class MediaServer(resource.Resource):
 		self.ciphermodes = ['CBC','GCM','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.public_key,self.private = None,None
+		self.sessions={}
 		self.shared_key=None
 		self.dh_parameters = None
 		
@@ -381,7 +382,7 @@ class MediaServer(resource.Resource):
 		method=data['method']
 		if method == 'NEGOTIATE_ALG':
 			return self.negotiate_alg(data)
-		elif method == 'DH_START':
+		elif method == 'KEY_EXCHANGE':
 			return self.key_exchange(data)
 
 		
