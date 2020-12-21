@@ -202,7 +202,8 @@ class Client:
 	def chunk_identification(self, chunk_id, media_id):
 		media_id=media_id
 		chunk_id=str(chunk_id)
-		final_id=(self.shared_key.decode('latin')+media_id+chunkid).encode('latin')
+		final_id=(self.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
+		logger.info(final_id)
 		algorithm=None
 		if self.digest =='SHA-256':
 			algorithm=hashes.SHA256()
@@ -210,8 +211,7 @@ class Client:
 			algorithm = hashes.SHA512()
 		digest=hashes.Hash(algorithm)
 		digest.update(final_id)
-		digest.finalize()
-		return digest
+		return digest.finalize()
 
 
 	def derive_key(self, data, salt):
@@ -220,7 +220,7 @@ class Client:
 			digest = hashes.SHA512()
 		elif self.digest == 'SHA-256':
 			digest =hashes.SHA256()
-		salt = os.urandom(16)
+		
 		# derive
 		kdf = PBKDF2HMAC(
 			algorithm=digest,
@@ -229,7 +229,7 @@ class Client:
 			iterations=100000,
 		)
 		key = kdf.derive(data)
-		return key,salt
+		return key
 
 
 	def verify_hmac(self, recv_hmac, crypto, key=None):
@@ -352,8 +352,9 @@ def main():
 		data = binascii.a2b_base64(chunk['data'].encode('latin'))
 		iv, salt = base64.b64decode(chunk['iv']), base64.b64decode(chunk['salt'])
 		hmac = base64.b64decode(chunk['hmac'])
-		key, salt = client.derive_key(client.chunk_identification(
-			chunk['chunk'], chunk['media_id']), salt)
+		logger.info(chunk['chunk'])
+		logger.info(chunk['media_id'])
+		key = client.derive_key(client.chunk_identification(chunk['chunk'], chunk['media_id']), salt)
 		verif = client.verify_hmac(hmac, data, key)
 		if verif:
 			logger.info("HMAC OK")
@@ -367,7 +368,7 @@ def main():
 				break
 		else:
 			logger.info("HMAC Wrong. Communications compromised")
-			break
+			exit(0)
 
 
 if __name__ == '__main__':

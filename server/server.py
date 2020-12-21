@@ -45,7 +45,7 @@ class Session:
 
 	counter = 0
 	def __init__(self):
-		self.id = counter
+		self.id = self.counter
 		self.pub_key = None				# public key do server
 		self.priv_key = None			# private key do server
 		self.client_pub_key = None 		# public key do cliente
@@ -55,7 +55,7 @@ class Session:
 		self.digest = None
 		self.dh_parameters = None		
 
-		counter+=1
+		self.counter+=1
 
 
 class MediaServer(resource.Resource):
@@ -89,9 +89,11 @@ class MediaServer(resource.Resource):
 				})
 		#print(type(media_list[0]['id']))
 		# Return list to client
+
+		session = self.sessions[0]
 		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-		cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'))
-		hmac=self.add_hmac(cryptogram)
+		cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'),session)
+		hmac=self.add_hmac(cryptogram,session)
 		print(len(hmac))
 		#print(type(cryptogram.decode('latin')))
 		crypto = base64.b64encode(cryptogram).decode('latin')
@@ -154,7 +156,7 @@ class MediaServer(resource.Resource):
 			data = f.read(CHUNK_SIZE)
 
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-			key,salt=self.derive_key(session,self.chunk_identification(session,chunk_id,media_id))
+			key,salt=self.derive_key(self.chunk_identification(session,chunk_id,media_id),session)
 			data,iv=self.encrypt_message(data,session)
 			print(len(iv))
 			#binascii.b2a_base64(data).decode('latin').strip(),
@@ -279,7 +281,7 @@ class MediaServer(resource.Resource):
 	def chunk_identification(self, session,chunk_id, media_id):
 		media_id=media_id
 		chunk_id=str(chunk_id)
-		final_id=(session.shared_key.decode('latin')+media_id+chunkid).encode('latin')
+		final_id=(session.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
 		algorithm=None
 		if session.digest =='SHA-256':
 			algorithm=hashes.SHA256()
@@ -287,11 +289,10 @@ class MediaServer(resource.Resource):
 			algorithm = hashes.SHA512()
 		digest=hashes.Hash(algorithm)
 		digest.update(final_id)
-		digest.finalize()
-		return digest
+		return digest.finalize()
 
 
-	def derive_key(self, data, salt,session):
+	def derive_key(self, data,session):
 		digest=None
 		if session.digest == 'SHA-512':
 			digest = hashes.SHA512()
@@ -391,7 +392,7 @@ class MediaServer(resource.Resource):
 			logger.debug('Confirmed the exchange of a key')
 			received_key=data['pub_key'].encode()
 			session.client_pub_key=load_pem_public_key(received_key)
-			session.shared_key = session.private_key.exchange(session.client_pubkey)
+			session.shared_key = session.private_key.exchange(session.client_pub_key)
 			message = {'method':'ACK'}
 			return self.send_message(message)
 
