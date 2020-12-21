@@ -76,6 +76,7 @@ class Client:
 		logger.info('Sending POST Request to exchange DH Shared key')
 		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 		data = {
+			'id' : self.session_id,
 			'method': 'KEY_EXCHANGE',
 			'pub_key': key
 		}
@@ -104,16 +105,8 @@ class Client:
 			logger.info('ERROR NEGOTIATING ALGORITHMS')
 		else:
 			logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
+			self.session_id=response['id']
 			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
-
-	def generate_key(self):
-		"""
-		Used to generate a ephemeral key to comunicate with the server 
-		"""
-		# TODO: random to choose which one to use
-		key_size = self.key_sizes[self.cipher][0]
-		key = os.urandom(key_size)
-		return key
 
 	def encrypt_message(self, text):
 		iv = os.urandom(16)
@@ -207,16 +200,27 @@ class Client:
 		return msg_bytes
 
 	def chunk_identification(self, chunk_id, media_id):
-		media_id = media_id.encode('latin')
-		chunk_id = str(chunk_id).encode('latin')
-		return bytes(a ^ b for a, b in zip(chunk_id, media_id))
+		media_id=media_id
+		chunk_id=str(chunk_id)
+		final_id=(self.shared_key.decode('latin')+media_id+chunkid).encode('latin')
+		algorithm=None
+		if self.digest =='SHA-256':
+			algorithm=hashes.SHA256()
+		elif self.digest == 'SHA-512':
+			algorithm = hashes.SHA512()
+		digest=hashes.Hash(algorithm)
+		digest.update(final_id)
+		digest.finalize()
+		return digest
+
 
 	def derive_key(self, data, salt):
-		digest = None
+		digest=None
 		if self.digest == 'SHA-512':
 			digest = hashes.SHA512()
 		elif self.digest == 'SHA-256':
-			digest = hashes.SHA256()
+			digest =hashes.SHA256()
+		salt = os.urandom(16)
 		# derive
 		kdf = PBKDF2HMAC(
 			algorithm=digest,
@@ -225,9 +229,8 @@ class Client:
 			iterations=100000,
 		)
 		key = kdf.derive(data)
-		#key = key^self.shared_key
-		key = bytes(a ^ b for a, b in zip(key, self.shared_key))
-		return key, salt
+		return key,salt
+
 
 	def verify_hmac(self, recv_hmac, crypto, key=None):
 		if key == None:

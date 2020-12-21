@@ -41,20 +41,31 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
 CATALOG_BASE = 'catalog'
 CHUNK_SIZE = 1024 * 4
 
+class Session:
+
+	counter = 0
+	def __init__(self):
+		self.id = counter
+		self.pub_key = None				# public key do server
+		self.priv_key = None			# private key do server
+		self.client_pub_key = None 		# public key do cliente
+		self.shared_key = None			# shared key
+		self.cipher = None				
+		self.mode = None
+		self.digest = None
+		self.dh_parameters = None		
+
+		counter+=1
+
+
 class MediaServer(resource.Resource):
 	isLeaf = True
 	def __init__(self):
-		#self.ciphers=[]
-		#self.digests=[]
-		#self.ciphermodes=[]
 		self.ciphers = ['ChaCha20','3DES','AES']
 		self.digests = ['SHA-512','SHA-256','SHA-384']
 		self.ciphermodes = ['CBC','GCM','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
-		self.public_key,self.private = None,None
 		self.sessions={}
-		self.shared_key=None
-		self.dh_parameters = None
 		
 	# Send the list of media files to clients
 	def do_list(self, request):
@@ -133,14 +144,18 @@ class MediaServer(resource.Resource):
 
 		offset = chunk_id * CHUNK_SIZE
 
+
+		#TODO:hardcoded
+		session = self.sessions[0]
+
 		# Open file, seek to correct position and return the chunk
 		with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
 			f.seek(offset)
 			data = f.read(CHUNK_SIZE)
 
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-			key,salt=self.derive_key(self.chunk_identification(chunk_id,media_id))
-			data,iv=self.encrypt_message(data,key)
+			key,salt=self.derive_key(session,self.chunk_identification(session,chunk_id,media_id))
+			data,iv=self.encrypt_message(data,session)
 			print(len(iv))
 			#binascii.b2a_base64(data).decode('latin').strip(),
 			return json.dumps(
@@ -150,7 +165,7 @@ class MediaServer(resource.Resource):
 						'data': binascii.b2a_base64(data).decode('latin').strip(),
 						'iv': base64.b64encode(iv).decode('latin'),
 						'salt': base64.b64encode(salt).decode('latin'),
-						'hmac': base64.b64encode(self.add_hmac(data,key)).decode('latin')
+						'hmac': base64.b64encode(self.add_hmac(data,session)).decode('latin')
 					},indent=4	
 				).encode('latin')
 
@@ -159,15 +174,14 @@ class MediaServer(resource.Resource):
 		return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
 
-	def encrypt_message(self,text,key=None):
+	def encrypt_message(self,text,session):
 		#logger.debug("aaaaaaaaaaa",text)
 		#logger.debug(text)
-		if key==None:
-			key = self.shared_key
+		key = session.shared_key
 		cipher=None
 		algorithm,iv=None,None
 		mode=None
-		size=self.key_sizes[self.cipher][0]
+		size=self.key_sizes[session.cipher][0]
 		enc_shared_key=key[:size//8]
 		logger.debug('Starting encription')
 		print("vamos ver ",len(enc_shared_key))
@@ -175,25 +189,25 @@ class MediaServer(resource.Resource):
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
 		#decryptor.update(ct) + decryptor.finalize()
-		if self.cipher == 'AES':
+		if session.cipher == 'AES':
 			algorithm = algorithms.AES(enc_shared_key)
 
-		elif self.cipher == '3DES':
+		elif session.cipher == '3DES':
 			algorithm = algorithms.TripleDES(enc_shared_key)
-		elif self.cipher == 'ChaCha20':
+		elif session.cipher == 'ChaCha20':
 			iv = os.urandom(16)
 			algorithm = algorithms.ChaCha20(enc_shared_key,iv)
 		else:
 			logger.debug('Algorithm not suported')
-		if self.cipher != 'ChaCha20':
+		if session.cipher != 'ChaCha20':
 			#with ChaCha20 we do not pad the data
 			iv = os.urandom(algorithm.block_size // 8)
 			
-			if self.mode == 'CBC':
+			if session.mode == 'CBC':
 				mode = modes.CBC(iv)
-			elif self.mode == 'GCM':
+			elif session.mode == 'GCM':
 				mode = modes.GCM(iv)
-			elif self.mode == 'CTR':
+			elif session.mode == 'CTR':
 				mode = modes.CTR(iv)
 			padder = padding.PKCS7(algorithm.block_size).padder()
 			padded_data = padder.update(text)
@@ -208,24 +222,24 @@ class MediaServer(resource.Resource):
 		#logger.debug(cryptogram,iv)
 		return cryptogram, iv
 
-	def add_hmac(self,message,key=None):
-		if key == None:
-			key=self.shared_key
+	def add_hmac(self,message,session):
+
+		key=session.shared_key
 		msg_bytes=None
-		size=self.key_sizes[self.cipher][0]
+		size=self.key_sizes[session.cipher][0]
 		enc_shared_key=key[:size//8]
-		if self.digest == 'SHA-512':
+		if session.digest == 'SHA-512':
 			h = hmac.HMAC(enc_shared_key, hashes.SHA512())
 			h.update(message)
 			msg_bytes = h.finalize() 
-		elif self.digest == 'SHA-256':
+		elif session.digest == 'SHA-256':
 			h = hmac.HMAC(enc_shared_key, hashes.SHA256())
 			h.update(message)
 			msg_bytes = h.finalize() 
 		return msg_bytes
 
 
-	def decrypt_message(self,cryptogram,iv):
+	def decrypt_message(self,cryptogram,iv,session):
 		cipher=None
 		algorithm=None
 		mode=None
@@ -233,21 +247,21 @@ class MediaServer(resource.Resource):
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
 		#decryptor.update(ct) + decryptor.finalize()
-		if self.cipher == 'AES':
-			algorithm = algorithms.AES(self.shared_key)
-		elif self.cipher == '3DES':
-			algorithm = algorithms.TripleDES(self.shared_key)
-		elif self.cipher == 'ChaCha20':
-			if iv!=None:algorithm = algorithms.ChaCha20(self.shared_key,iv)
+		if session.cipher == 'AES':
+			algorithm = algorithms.AES(session.shared_key)
+		elif session.cipher == '3DES':
+			algorithm = algorithms.TripleDES(session.shared_key)
+		elif session.cipher == 'ChaCha20':
+			if iv!=None:algorithm = algorithms.ChaCha20(session.shared_key,iv)
 		else:
 			logger.debug('Algorithm not suported')
 
 		#with ChaCha20 we do not pad the data
-		if self.mode == 'CBC':
+		if session.mode == 'CBC':
 			mode = modes.CBC(iv)
-		elif self.mode == 'GCM':
+		elif session.mode == 'GCM':
 			mode = modes.GCM(iv)
-		elif self.mode == 'CTR':
+		elif session.mode == 'CTR':
 			mode = modes.CTR(iv)
 
 		cipher = Cipher(algorithm, mode=mode)       
@@ -256,40 +270,43 @@ class MediaServer(resource.Resource):
 		if algorithm == 'ChaCha20': return decryptor.update(cryptogram) + decryptor.finalize()
 		else:
 			padded_data = decryptor.update(cryptogram) + decryptor.finalize()
-			unpadder = padding.PKCS7(self.key_sizes[self.cipher][0]).unpadder()
+			unpadder = padding.PKCS7(self.key_sizes[session.cipher][0]).unpadder()
 			text = unpadder.update(padded_data)
 			text += unpadder.finalize()
 			return text
 
-	def chunk_identification(self,chunk_id,media_id):
-		media_id=media_id.encode('latin')
-		chunk_id=str(chunk_id).encode('latin')
-		return bytes(a ^ b for a, b in zip(chunk_id, media_id))
 
-	def derive_key(self,data):
+	def chunk_identification(self, session,chunk_id, media_id):
+		media_id=media_id
+		chunk_id=str(chunk_id)
+		final_id=(session.shared_key.decode('latin')+media_id+chunkid).encode('latin')
+		algorithm=None
+		if session.digest =='SHA-256':
+			algorithm=hashes.SHA256()
+		elif session.digest == 'SHA-512':
+			algorithm = hashes.SHA512()
+		digest=hashes.Hash(algorithm)
+		digest.update(final_id)
+		digest.finalize()
+		return digest
+
+
+	def derive_key(self, data, salt,session):
 		digest=None
-		if self.digest == 'SHA-512':
+		if session.digest == 'SHA-512':
 			digest = hashes.SHA512()
-		elif self.digest == 'SHA-256':
+		elif session.digest == 'SHA-256':
 			digest =hashes.SHA256()
 		salt = os.urandom(16)
 		# derive
 		kdf = PBKDF2HMAC(
 			algorithm=digest,
-			length=128,
+			length=32,
 			salt=salt,
 			iterations=100000,
 		)
 		key = kdf.derive(data)
-		#key = key^self.shared_key
-		print("-_>",len(key),len(self.shared_key),len(data))
-		key=bytes(a ^ b for a, b in zip(key, self.shared_key))
-		print("--->",len(key))
 		return key,salt
-
-
-
-
 
 	def do_get_protocols(self,request):
 		#receber os algoritmos e ver quais é o servidor tem
@@ -325,13 +342,16 @@ class MediaServer(resource.Resource):
 		After that sends to client parameters and pub_key
 		"""
 		logger.debug('Generating parameters and keys...')
-		self.dh_parameters = dh.generate_parameters(generator=2, key_size=1024)
-		self.private_key = self.dh_parameters.generate_private_key()
-		self.public_key = self.private_key.public_key()
-		parameter_num = self.dh_parameters.parameter_numbers()
+
+		#TODO: GET tem de ter o id do cliente
+		session = self.sessions[0]
+		session.dh_parameters = dh.generate_parameters(generator=2, key_size=1024)
+		session.private_key = session.dh_parameters.generate_private_key()
+		session.public_key = session.private_key.public_key()
+		parameter_num = session.dh_parameters.parameter_numbers()
 		logger.debug('Generated keys and parameters with sucess')
 		#print(parameter_num.g, parameter_num.p)
-		pub_key=self.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+		pub_key=session.public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 		data = {'method':'DH_START','p':parameter_num.p,'g':parameter_num.g,'pub_key':pub_key}
 		
 		print(pub_key)
@@ -349,25 +369,29 @@ class MediaServer(resource.Resource):
 	
 		# enviar mensagem a dizer q n pode
 		#server chooses the cipher to communicate acordding to client's available ciphers
-		self.cipher = availableciphers[0]
-		self.digest = availabledigests[0]
-		self.mode=None
-		if self.cipher!='ChaCha20': self.mode   = availablemodes[0] 
-		print(self.cipher,self.digest,self.mode)
-		logger.debug('Sucess checking ciphers')
+		session = Session()
+		session.cipher = availableciphers[0]
+		session.digest = availabledigests[0]
+		session.mode=None
+		if session.cipher!='ChaCha20':
+			session.mode = availablemodes[0] 
+		print(session.cipher,session.digest,session.mode)
+		self.sessions[session.id] = session
+		logger.debug('Success checking ciphers')
 		#enviar 
-		message = {'method': 'NEGOTIATE_ALG','cipher':self.cipher,'mode':self.mode,'digest':self.digest}
+		message = {'method': 'NEGOTIATE_ALG','id':session.id,'cipher':session.cipher,'mode':session.mode,'digest':session.digest}
 		return self.send_message(message)
 		
 	
 	def dh_exchange_key(self,request):
 		data= json.loads(request.content.getvalue())
+		session = self.sessions[data['id']]
 		method=data['method']
 		if method =='KEY_EXCHANGE':
 			logger.debug('Confirmed the exchange of a key')
 			received_key=data['pub_key'].encode()
-			self.client_pubkey=load_pem_public_key(received_key)
-			self.shared_key = self.private_key.exchange(self.client_pubkey)
+			session.client_pub_key=load_pem_public_key(received_key)
+			session.shared_key = session.private_key.exchange(session.client_pubkey)
 			message = {'method':'ACK'}
 			return self.send_message(message)
 
