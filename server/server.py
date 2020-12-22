@@ -32,9 +32,9 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
 				'name': 'Sunny Afternoon - Upbeat Ukulele Background Music',
 				'album': 'Upbeat Ukulele Background Music',
 				'description': 'Nicolai Heidlas Music: http://soundcloud.com/nicolai-heidlas',
-				'duration': 3*60+33,
+				'duration': 3*60+32,
 				'file_name': '898a08080d1840793122b7e118b27a95d117ebce.mp3',
-				'file_size': 3407202
+				'file_size': 7072823
 			}
 		}
 
@@ -69,12 +69,6 @@ class MediaServer(resource.Resource):
 		
 	# Send the list of media files to clients
 	def do_list(self, request):
-
-		#auth = request.getHeader('Authorization')
-		#if not auth:
-		#    request.setResponseCode(401)
-		#    return 'Not authorized'
-
 
 		# Build list
 		media_list = []
@@ -157,8 +151,7 @@ class MediaServer(resource.Resource):
 
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 			key,salt=self.derive_key(self.chunk_identification(session,chunk_id,media_id),session)
-			data,iv=self.encrypt_message(data,session)
-			print(len(iv))
+			data,iv=self.encrypt_message(data,session,key)
 			#binascii.b2a_base64(data).decode('latin').strip(),
 			return json.dumps(
 					{
@@ -167,7 +160,7 @@ class MediaServer(resource.Resource):
 						'data': binascii.b2a_base64(data).decode('latin').strip(),
 						'iv': base64.b64encode(iv).decode('latin'),
 						'salt': base64.b64encode(salt).decode('latin'),
-						'hmac': base64.b64encode(self.add_hmac(data,session)).decode('latin')
+						'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')
 					},indent=4	
 				).encode('latin')
 
@@ -176,17 +169,17 @@ class MediaServer(resource.Resource):
 		return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
 
-	def encrypt_message(self,text,session):
+	def encrypt_message(self,text,session,key=None):
 		#logger.debug("aaaaaaaaaaa",text)
 		#logger.debug(text)
-		key = session.shared_key
+		if key == None:
+			key = session.shared_key
 		cipher=None
 		algorithm,iv=None,None
 		mode=None
 		size=self.key_sizes[session.cipher][0]
 		enc_shared_key=key[:size//8]
 		logger.debug('Starting encription')
-		print("vamos ver ",len(enc_shared_key))
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
@@ -224,9 +217,10 @@ class MediaServer(resource.Resource):
 		#logger.debug(cryptogram,iv)
 		return cryptogram, iv
 
-	def add_hmac(self,message,session):
-
-		key=session.shared_key
+	def add_hmac(self,message,session,key=None):
+		
+		if key == None:
+			key=session.shared_key
 		msg_bytes=None
 		size=self.key_sizes[session.cipher][0]
 		enc_shared_key=key[:size//8]
@@ -241,20 +235,22 @@ class MediaServer(resource.Resource):
 		return msg_bytes
 
 
-	def decrypt_message(self,cryptogram,iv,session):
+	def decrypt_message(self,cryptogram,iv,session,key=None):
 		cipher=None
 		algorithm=None
 		mode=None
+		if key==None:
+			key=session.shared_key
 		#encryptor = cipher.encryptor()
 		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
 		#decryptor = cipher.decryptor()
 		#decryptor.update(ct) + decryptor.finalize()
 		if session.cipher == 'AES':
-			algorithm = algorithms.AES(session.shared_key)
+			algorithm = algorithms.AES(key)
 		elif session.cipher == '3DES':
-			algorithm = algorithms.TripleDES(session.shared_key)
+			algorithm = algorithms.TripleDES(key)
 		elif session.cipher == 'ChaCha20':
-			if iv!=None:algorithm = algorithms.ChaCha20(session.shared_key,iv)
+			if iv!=None:algorithm = algorithms.ChaCha20(key,iv)
 		else:
 			logger.debug('Algorithm not suported')
 
@@ -316,11 +312,6 @@ class MediaServer(resource.Resource):
 
 	def send_message(self,message):
 		""" Encodes messages """
-
-		#if self.shared_key:        
-			#message = self.encrypt_message(json.dumps(message).encode('latin'))            
-			#pass
-		#else:
 		message = json.dumps(message).encode('latin')
 		return message
 
@@ -474,4 +465,3 @@ print("URL is: http://IP:8080")
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
 reactor.run()    
-	

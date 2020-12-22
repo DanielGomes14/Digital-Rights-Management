@@ -185,6 +185,7 @@ class Client:
 			text += unpadder.finalize()
 			return text
 
+	
 	def add_hmac(self, message, key=None):
 		if key == None:
 			key = self.shared_key
@@ -200,10 +201,8 @@ class Client:
 		return msg_bytes
 
 	def chunk_identification(self, chunk_id, media_id):
-		media_id=media_id
-		chunk_id=str(chunk_id)
-		final_id=(self.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
-		logger.info(final_id)
+		chunk_id = str(chunk_id)
+		final_id =(self.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
 		algorithm=None
 		if self.digest =='SHA-256':
 			algorithm=hashes.SHA256()
@@ -214,7 +213,7 @@ class Client:
 		return digest.finalize()
 
 
-	def derive_key(self, data, salt):
+	def derive_key(self, data, salt): 
 		digest=None
 		if self.digest == 'SHA-512':
 			digest = hashes.SHA512()
@@ -352,15 +351,13 @@ def main():
 		data = binascii.a2b_base64(chunk['data'].encode('latin'))
 		iv, salt = base64.b64decode(chunk['iv']), base64.b64decode(chunk['salt'])
 		hmac = base64.b64decode(chunk['hmac'])
-		logger.info(chunk['chunk'])
-		logger.info(chunk['media_id'])
 		key = client.derive_key(client.chunk_identification(chunk['chunk'], chunk['media_id']), salt)
 		verif = client.verify_hmac(hmac, data, key)
 		if verif:
 			logger.info("HMAC OK")
 			data = client.decrypt_message(data, iv, key)
 			# TODO: Process chunk
-			logger.info(data)
+			#logger.info(data)
 			#data = binascii.a2b_base64(data)
 			try:
 				proc.stdin.write(data)
