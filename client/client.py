@@ -48,11 +48,35 @@ class Client:
 	def has_negotiated(self):
 		return not (self.cipher is None or self.digest is None)
 
+	def negotiate_algs(self):
+		data = {
+			'method': "NEGOTIATE_ALG",
+			'ciphers': self.ciphers,
+			'digests': self.digests,
+			'ciphermodes': self.ciphermodes
+		}
+		request = requests.post(f'{SERVER_URL}/api/protocols',json=data, headers={'Content-Type': 'application/json'})
+		response = json.loads(request.text)
+		
+		if response['method'] == 'ALG_ERROR':
+			logger.info('ERROR NEGOTIATING ALGORITHMS')
+		else:
+			logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
+			self.session_id=response['id']
+			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
+
+
 	def dh_start(self):
-		""" Diffie-Helman: get parameters and generate public and private key  """
+		""" Diffie-Helman: get parameters and generate public and private key """
 		
 		# GET request for the parameters and server public key
-		response = requests.get(f'{SERVER_URL}/api/key')
+		payload=None
+		if self.session_id!=None:
+			payload = {
+				'session_id':self.session_id
+			}
+		response = requests.get(f'{SERVER_URL}/api/key',params=payload)
+		
 		logger.info('Received parameters and Public Key with sucess')
 		data = json.loads(response.text)
 		print(data)
@@ -91,22 +115,6 @@ class Client:
 		else:
 			logger.info('Could not exchange a key with the server')
 
-	def negotiate_algs(self):
-		data = {
-			'method': "NEGOTIATE_ALG",
-			'ciphers': self.ciphers,
-			'digests': self.digests,
-			'ciphermodes': self.ciphermodes
-		}
-		request = requests.post(f'{SERVER_URL}/api/protocols',json=data, headers={'Content-Type': 'application/json'})
-		response = json.loads(request.text)
-		
-		if response['method'] == 'ALG_ERROR':
-			logger.info('ERROR NEGOTIATING ALGORITHMS')
-		else:
-			logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
-			self.session_id=response['id']
-			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
 
 	def encrypt_message(self, text):
 		iv = os.urandom(16)
@@ -251,7 +259,13 @@ class Client:
 			return False
 
 	def get_list(self):
-		req = requests.get(f'{SERVER_URL}/api/list')
+		payload=None
+		if self.session_id!=None:
+			payload = {
+				'session_id':self.session_id
+			}
+		logger.info("get list")
+		req = requests.get(f'{SERVER_URL}/api/list',params=payload)
 		if req.status_code == 200:
 			print("Got Server List")
 		data = json.loads(req.text)
@@ -345,7 +359,7 @@ def main():
 	# Get data from server and send it to the ffplay stdin through a pipe
 	for chunk in range(media_item['chunks'] + 1):
 		req = requests.get(
-			f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}')
+			f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}&session_id={client.session_id}')
 
 		chunk = req.json()
 		data = binascii.a2b_base64(chunk['data'].encode('latin'))

@@ -45,7 +45,7 @@ class Session:
 
 	counter = 0
 	def __init__(self):
-		self.id = self.counter
+		self.id = Session.counter
 		self.pub_key = None				# public key do server
 		self.priv_key = None			# private key do server
 		self.client_pub_key = None 		# public key do cliente
@@ -53,9 +53,9 @@ class Session:
 		self.cipher = None				
 		self.mode = None
 		self.digest = None
-		self.dh_parameters = None		
-
-		self.counter+=1
+		self.dh_parameters = None
+	
+		Session.counter+=1
 
 
 class MediaServer(resource.Resource):
@@ -67,6 +67,18 @@ class MediaServer(resource.Resource):
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.sessions={}
 		
+	def check_session_id(self,args):
+		if b'session_id' not in args:
+			logger.debug("id not in the request parameters")
+			return None
+		logger.debug("id is in the request parameters")
+		id = int(args[b'session_id'][0].decode())
+		session = self.sessions.get(id)
+		logger.debug(session.id)
+		if session == None:
+			return None
+		return session
+
 	# Send the list of media files to clients
 	def do_list(self, request):
 
@@ -83,8 +95,13 @@ class MediaServer(resource.Resource):
 				})
 		#print(type(media_list[0]['id']))
 		# Return list to client
-
-		session = self.sessions[0]
+		
+		logger.debug(request.args)
+		#params=j
+		session = self.check_session_id(request.args)
+		if session == None:
+			return json.dumps({'error': 'Session ID not valid or not passed'}, indent=4).encode('latin') 
+		
 		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 		cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'),session)
 		hmac=self.add_hmac(cryptogram,session)
@@ -96,14 +113,15 @@ class MediaServer(resource.Resource):
 		data= {'method':'SERVERLIST','cryptogram':crypto,'iv':iv, 'hmac': hmac}
 		return json.dumps(data, indent=4).encode('latin')
 
+	def do_download(self,request):
+		session = self.check_session_id(request.args)
+		if session == None:
+			return json.dumps({'error': 'Session ID not valid or not passed'}, indent=4).encode('latin')
 
-	# Send a media chunk to the client
-	def do_download(self, request):
+		# Check if the media_id is not None as it is required
 		logger.debug(f'Download: args: {request.args}')
 		media_id = request.args.get(b'id', [None])[0]
 		logger.debug(f'Download: id: {media_id}')
-
-		# Check if the media_id is not None as it is required
 		if media_id is None:
 			request.setResponseCode(400)
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -140,10 +158,7 @@ class MediaServer(resource.Resource):
 
 		offset = chunk_id * CHUNK_SIZE
 
-
-		#TODO:hardcoded
-		session = self.sessions[0]
-
+		
 		# Open file, seek to correct position and return the chunk
 		with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
 			f.seek(offset)
@@ -320,6 +335,7 @@ class MediaServer(resource.Resource):
 		if method=='NEGOTIATE_ALG':
 			data={'method': 'ALG_ERROR'}
 			message = json.dumps(data).encode('latin')
+		
 		else:
 			data= {'method': 'KEY_ERROR'}
 			message = json.dumps(data).encode('latin')
@@ -327,16 +343,17 @@ class MediaServer(resource.Resource):
 	
 	
 
-	def dh_key_gen(self):
+	def dh_key_gen(self,request):
 		"""
 		Generates the parameters necessary to start the Diffie-Hellman Algorithm
 		along with the server private and public key.
 		After that sends to client parameters and pub_key
 		"""
 		logger.debug('Generating parameters and keys...')
-
-		#TODO: GET tem de ter o id do cliente
-		session = self.sessions[0]
+		
+		session = self.check_session_id(request.args)
+		if session == None:
+			return json.dumps({'error': 'Session ID not found or not passed'}, indent=4).encode('latin')
 		session.dh_parameters = dh.generate_parameters(generator=2, key_size=1024)
 		session.private_key = session.dh_parameters.generate_private_key()
 		session.public_key = session.private_key.public_key()
@@ -413,10 +430,11 @@ class MediaServer(resource.Resource):
 		try:
 			if request.path == b'/api/protocols':
 				return self.do_get_protocols(request)
-			elif request.uri == b'/api/key':
+			elif request.path == b'/api/key':
 			#...chave publica do server
 				request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-				return self.dh_key_gen()
+				logger.debug("entrei")
+				return self.dh_key_gen(request)
 			#elif request.uri == 'api/auth':
 			#autenticaçao, later on..
 			elif request.path == b'/api/list':
@@ -465,3 +483,5 @@ print("URL is: http://IP:8080")
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
 reactor.run()    
+
+
