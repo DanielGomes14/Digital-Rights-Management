@@ -72,7 +72,7 @@ class MediaServer(resource.Resource):
 			logger.debug("id not in the request parameters")
 			return None
 		logger.debug("id is in the request parameters")
-		id = int(args[b'session_id'][0].decode())
+		id = int(args[b'session_id'].decode())
 		session = self.sessions.get(id)
 		logger.debug(session.id)
 		if session == None:
@@ -98,9 +98,10 @@ class MediaServer(resource.Resource):
 		
 		logger.debug(request.args)
 		#params=j
-		session = self.check_session_id(request.args)
+		session = self.check_session_id(request.getAllHeaders())
 		if session == None:
 			return json.dumps({'error': 'Session ID not valid or not passed'}, indent=4).encode('latin') 
+		
 		
 		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 		cryptogram,iv=self.encrypt_message(json.dumps(media_list).encode('latin'),session)
@@ -114,14 +115,13 @@ class MediaServer(resource.Resource):
 		return json.dumps(data, indent=4).encode('latin')
 
 	def do_download(self,request):
-		session = self.check_session_id(request.args)
+		
+		session = self.check_session_id(request.getAllHeaders())
 		if session == None:
 			return json.dumps({'error': 'Session ID not valid or not passed'}, indent=4).encode('latin')
 
 		# Check if the media_id is not None as it is required
-		logger.debug(f'Download: args: {request.args}')
 		media_id = request.args.get(b'id', [None])[0]
-		logger.debug(f'Download: id: {media_id}')
 		if media_id is None:
 			request.setResponseCode(400)
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -351,7 +351,7 @@ class MediaServer(resource.Resource):
 		"""
 		logger.debug('Generating parameters and keys...')
 		
-		session = self.check_session_id(request.args)
+		session = self.check_session_id(request.getAllHeaders())
 		if session == None:
 			return json.dumps({'error': 'Session ID not found or not passed'}, indent=4).encode('latin')
 		session.dh_parameters = dh.generate_parameters(generator=2, key_size=1024)
@@ -394,15 +394,17 @@ class MediaServer(resource.Resource):
 	
 	def dh_exchange_key(self,request):
 		data= json.loads(request.content.getvalue())
-		session = self.sessions[data['id']]
-		method=data['method']
-		if method =='KEY_EXCHANGE':
-			logger.debug('Confirmed the exchange of a key')
-			received_key=data['pub_key'].encode()
-			session.client_pub_key=load_pem_public_key(received_key)
-			session.shared_key = session.private_key.exchange(session.client_pub_key)
-			message = {'method':'ACK'}
-			return self.send_message(message)
+		session = self.check_session_id(request.getAllHeaders())
+		print(session)
+		if session !=None:
+			method=data['method']
+			if method =='KEY_EXCHANGE':
+				logger.debug('Confirmed the exchange of a key')
+				received_key=data['pub_key'].encode()
+				session.client_pub_key=load_pem_public_key(received_key)
+				session.shared_key = session.private_key.exchange(session.client_pub_key)
+				message = {'method':'ACK'}
+				return self.send_message(message)
 
 		logger.debug('Could not exchange a key. oof')
 		return self.send_error_message('NACK')
@@ -419,8 +421,6 @@ class MediaServer(resource.Resource):
 			return self.key_exchange(data)
 
 		
-
-
 	
 	# Handle a GET request
 	def render_GET(self, request):

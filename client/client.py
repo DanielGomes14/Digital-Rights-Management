@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
+import datetime
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -44,6 +44,38 @@ class Client:
 		self.key_sizes = {'3DES': [192, 168, 64],
 			'AES': [256, 192, 128], 'ChaCha20': [256]}
 		self.dh_parameters = None
+		self.trusting_chain=[]
+		self.issuers_certs={}
+
+		
+	def validate_certificate(self, certificate):
+		dates = (certificate.not_valid_before.timestamp(),certificate.not_valid_after.timestamp())
+		date_now=datetime.now().timestamp()
+		if dates[0]< date_now < dates[1]:
+			return False
+		else:	
+			return True
+
+
+	#1- ler toda a chain de certificados até a um certificado auto assinado
+	#2- para cada certificado nessa chain tratar da validação:
+		#a)- ver datas (validate_certificate)
+		#b)- ver crls 
+		#c)- verificar a assinatura
+	def load_c
+
+	def validate_chain(self):
+		pass
+
+	def build_cert_chain(self,certificate,chain=[]):
+
+		
+		if 
+
+
+
+
+
 
 	def has_negotiated(self):
 		return not (self.cipher is None or self.digest is None)
@@ -70,12 +102,12 @@ class Client:
 		""" Diffie-Helman: get parameters and generate public and private key """
 		
 		# GET request for the parameters and server public key
-		payload=None
+		headers=None
 		if self.session_id!=None:
-			payload = {
-				'session_id':self.session_id
+			headers = {
+				'session_id':str(self.session_id)
 			}
-		response = requests.get(f'{SERVER_URL}/api/key',params=payload)
+		response = requests.get(f'{SERVER_URL}/api/key',headers=headers)
 		
 		logger.info('Received parameters and Public Key with sucess')
 		data = json.loads(response.text)
@@ -100,12 +132,11 @@ class Client:
 		logger.info('Sending POST Request to exchange DH Shared key')
 		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 		data = {
-			'id' : self.session_id,
 			'method': 'KEY_EXCHANGE',
 			'pub_key': key
 		}
 		# POST request sending public key
-		request = requests.post(f'{SERVER_URL}/api/key', json=data, headers={'Content-Type': 'application/json'})
+		request = requests.post(f'{SERVER_URL}/api/key', json=data, headers={'Content-Type': 'application/json','session_id' : str(self.session_id)})
 		data = json.loads(request.text)
 		print(data)
 		method = data['method']
@@ -261,14 +292,16 @@ class Client:
 	def get_list(self):
 		payload=None
 		if self.session_id!=None:
-			payload = {
-				'session_id':self.session_id
+			headers = {
+				'session_id':str(self.session_id)
 			}
 		logger.info("get list")
-		req = requests.get(f'{SERVER_URL}/api/list',params=payload)
+		req = requests.get(f'{SERVER_URL}/api/list',headers=headers)
+
 		if req.status_code == 200:
 			print("Got Server List")
 		data = json.loads(req.text)
+		print(data)
 		cryptogram = base64.b64decode(data['cryptogram'])
 		iv = base64.b64decode(data['iv'])
 		print(len(iv))
@@ -357,9 +390,12 @@ def main():
 		proc = subprocess.Popen(['ffplay', '-i', '-'], stdin=subprocess.PIPE)
 
 	# Get data from server and send it to the ffplay stdin through a pipe
+	headers={
+		'session_id': str(client.session_id)
+	}
 	for chunk in range(media_item['chunks'] + 1):
 		req = requests.get(
-			f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}&session_id={client.session_id}')
+			f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}',headers=headers)
 
 		chunk = req.json()
 		data = binascii.a2b_base64(chunk['data'].encode('latin'))
