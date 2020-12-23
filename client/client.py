@@ -20,7 +20,10 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import datetime
+from cryptography.x509.oid import ExtensionOID
+from cryptography import x509   
+import os
+from datetime import datetime 
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -46,15 +49,9 @@ class Client:
 		self.dh_parameters = None
 		self.trusting_chain=[]
 		self.issuers_certs={}
-
-		
-	def validate_certificate(self, certificate):
-		dates = (certificate.not_valid_before.timestamp(),certificate.not_valid_after.timestamp())
-		date_now=datetime.now().timestamp()
-		if dates[0]< date_now < dates[1]:
-			return False
-		else:	
-			return True
+		self.crls_list=[]
+		self.load_certs('../lixo')
+		self.load_crl('../lixo')
 
 
 	#1- ler toda a chain de certificados até a um certificado auto assinado
@@ -62,20 +59,107 @@ class Client:
 		#a)- ver datas (validate_certificate)
 		#b)- ver crls 
 		#c)- verificar a assinatura
-	def load_c
-
-	def validate_chain(self):
-		pass
-
-	def build_cert_chain(self,certificate,chain=[]):
-
+	#def load_c
 		
-		if 
+	def validate_certificate(self, certificate):
+		dates = (certificate.not_valid_before.timestamp(),certificate.not_valid_after.timestamp())
+		date_now=datetime.now().timestamp()
+		return dates[0]< date_now < dates[1]
+
+	def validate_server_purpose(self,certificate)
+		validation=cert.extensions.get_extension_for_oid(ExtensionOID.SERVER_AUTH)
+		logger.info("purpose:" + validation)
+		return validation != None
+	
+	
+	
+	def validate_signature(self,issuer,subject):
+	"""
+	Validate the Signature of a Certificate
+	The issuer parameter represents the certificate of the issuer
+	The subject parameter represents the certificate we want to verify
+	"""
+		issuer_pub_key = issuer.public_key()
+        try:
+            issuer_pub_key.verify(
+                subject.signature,
+                subject.tbs_certificate_bytes,
+                padding.PKCS1v15(),
+                subject.signature_hash_algorithm,
+            )
+            return True
+        except:
+			logger.info("Could not Validate the Signature of the Certificate")
+            return False
 
 
+	def crl_validation(self,cert):
+		"""Validate if certificate is in list of the revocated certificates"""
+		return all(crl.get_revoked_certificate_by_serial_number(cert.serial_number) == None for crl in self.crls_list)
+	
+
+	def validate_cert_chain(self):
+        chain = self.trusting_chain 
+        for i in range(0, len(chain) -1):
+			#verifies if the signatures are valid 
+            if not self.validate_signature(chain[i+1], chain[i]):
+				return False
+			# verifies if the certificate is not on a CRL 
+            if not self.crl_validation(chain[i]):
+				return False
+			
+        return True 
+
+	def load_certs(self,path):
+		try:
+			with os.scandir(path) as it:
+				for entry in it:
+					if entry.name.endswith('crt') and entry.is_file():
+					with open(path + entry.name,'rb') as cert:
+						data=cert.read()
+						cr = x509.load_pem_x509_certificate(data)
+						if self.validate_certificate(cr):
+							self.issuers_cert[cr.subject.rfc4514_string()]=cert
+							
+				logger.info("Certicates loaded!")
+		except:
+			logger.info("Could not read Path!")
+	
+	
+	def load_crl(self,path):
+		try:
+			with os.scandir(path) as it:
+				for entry in it:
+					if entry.name.endswith('crl') and entry.is_file():
+					with open(path + entry.name,'rb') as cert:
+						crl_data = f.read()
+						crl = x509.load_der_x509_crl(crl_data, default_backend())
+						crls_list.append(crl)
+						
+				logger.info("Certicates loaded!")
+		except:
+			logger.info("Could not read Path!")
 
 
-
+	def build_cert_chain(self,certificate):
+		chain = []
+		last = None
+		logger.info("Starting to build trusting chain..")
+		while True:
+			if last == certificate:
+				return None
+			last = certicate
+			
+			chain.append(certificate)
+			issuer = certificate.issuer.rfc4514_string()
+			subject = certificate.subject.rfc4514_string()
+			
+			if issuer == subject and issuer in self.issuers_certs:
+				return chain
+			
+			if issuer in self.issuers_certs:
+				certificate = self.issuers_cert[issuer]
+		logger.info("Chain Built with success")
 
 	def has_negotiated(self):
 		return not (self.cipher is None or self.digest is None)
@@ -96,7 +180,16 @@ class Client:
 			logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
 			self.session_id=response['id']
 			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
+			cert = base64.b64decode(response['cert'])
+			cert = x509.load_pem_x509_certificate(cert.decode('latin'))
+			self.build_cert_chain(cert)
+			if self.validate_chain():
+				self.server_cert = cert
+			else:
+				debug.info("Certificate is not valid")
+				exit(1)		# TODO: ver
 
+			self.server_cert=cert
 
 	def dh_start(self):
 		""" Diffie-Helman: get parameters and generate public and private key """
@@ -423,3 +516,33 @@ if __name__ == '__main__':
 	while True:
 		main()
 		time.sleep(1)
+
+
+##########################LARANJO######################
+#######################################################
+'''
+def validate_chain(self, chain):
+        
+        crl = self.load_crl('multicert-ca-02.crl')
+
+        for cert in chain:
+            crl_result = self.crl_validation(crl, cert)
+            if not crl_result:
+				return False
+            dates = self.validate_certificate(cert)
+            if not dates:
+				return False
+             
+        purpose = self.validate_purpose(chain[0])
+        if not purpose:
+			return False
+			
+        for i in range(0, len(chain) -1):
+            signature_valid = self.validate_signatures(chain[i], chain[i+1])
+            if not signature_valid:
+				return False
+        if dates_valid and purpose_valid and signature_valid and crl_valid:
+            return True
+        else:
+            return False 
+'''

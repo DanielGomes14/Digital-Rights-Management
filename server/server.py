@@ -66,6 +66,8 @@ class MediaServer(resource.Resource):
 		self.ciphermodes = ['CBC','GCM','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.sessions={}
+		self.certificate = self.load_cert('./lixo/sio_server.crt')
+
 		
 	def check_session_id(self,args):
 		if b'session_id' not in args:
@@ -78,6 +80,11 @@ class MediaServer(resource.Resource):
 		if session == None:
 			return None
 		return session
+
+	def load_cert(self,file):
+		with open(file, 'rb') as f:
+            cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+        return cert
 
 	# Send the list of media files to clients
 	def do_list(self, request):
