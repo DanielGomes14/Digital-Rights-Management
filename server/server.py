@@ -17,12 +17,14 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import logging
 import binascii
 import json
-from datetime import datetime
 import os
 import math
 import base64
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography import x509 
+from datetime import datetime,timedelta
+from cryptography.x509.oid import NameOID
+import sys
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -56,21 +58,25 @@ class Session:
 		self.mode = None
 		self.digest = None
 		self.dh_parameters = None
-	
+		self.user = None
+
 		Session.counter+=1
 
 
+	
 class MediaServer(resource.Resource):
 	isLeaf = True
 	def __init__(self):
 		self.ciphers = ['AES','3DES','ChaCha20']
 		self.digests = ['SHA-512','SHA-256','SHA-384']
-		self.ciphermodes = ['CBC','GCM','CTR']
+		self.ciphermodes = ['CBC','CTR']
 		self.key_sizes = {'3DES':[192,168,64],'AES':[256,192,128],'ChaCha20':[256]}
 		self.sessions={}
 		self.certificate = self.load_cert('../lixo/sio_server.crt')
 		self.load_priv_key('../lixo/sio_server.pem')
-		
+		self.licenses = {}		# media_id : list(user)	
+
+
 	def check_session_id(self,args):
 		if b'session_id' not in args:
 			logger.debug("id not in the request parameters")
@@ -110,7 +116,46 @@ class MediaServer(resource.Resource):
 		print(signature)
 		return signature
 
+	def validate_license(self,license,media_id):
+		""" Checks if license is up to date and if it is equal to the server """
+		now = datetime.now().timestamp()
+		dates = (license.not_valid_before.timestamp(),license.not_valid_after.timestamp())
+		print(self.licenses)
+		return ( dates[0] < now < dates[1] and license in self.licenses[(media_id).decode('latin')]  and 
+		any(license.subject.rfc4514_string() == lc.subject.rfc4514_string() for lc in self.licenses[(media_id).decode('latin')]))
 
+
+	def gen_license(self,session,media_id):
+		# Provide various details about who we are.
+		subject = issuer = x509.Name([
+		x509.NameAttribute(NameOID.COUNTRY_NAME, u"PT"),
+		x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Aveiro"),
+		x509.NameAttribute(NameOID.LOCALITY_NAME, u"Aveiro"),
+		x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"DETI"),
+		x509.NameAttribute(NameOID.COMMON_NAME, str(session.user)),
+		])
+		cert = x509.CertificateBuilder().subject_name(
+			subject
+		).issuer_name(
+			issuer
+		).public_key(
+			self.certificate.public_key()
+		).serial_number(
+			x509.random_serial_number()
+		).not_valid_before(
+			datetime.utcnow()
+		).not_valid_after(
+			datetime.utcnow() + timedelta(days=10)
+		).sign(self.private_key, hashes.SHA256())
+		if media_id not in self.licenses:
+			print(media_id)
+			self.licenses[media_id]=set()
+			self.licenses[media_id].add(cert)
+		else:
+			self.licenses[media_id].add(cert)
+	
+		return cert
+		
 
 	# Send the list of media files to clients
 	def do_list(self, request,session):
@@ -218,6 +263,27 @@ class MediaServer(resource.Resource):
 			logger.info("HMAC Wrong. Communications will not continue")
 			return False
 
+	def verify_token(self,session,token,key=None):
+		if key == None:
+			key = session.shared_key
+		h = None
+		digest = None
+		if session.digest == 'SHA-512':
+			digest = hashes.SHA512()
+		elif session.digest == 'SHA-256':
+			digest = hashes.SHA256()
+		size = self.key_sizes[session.cipher][0]
+		h = hmac.HMAC(key[:size//8], digest)
+		h.update(str(session.download_counter+1).encode('latin'))
+		try:
+			h.verify(token)
+			return True
+		except:
+			logger.info("Download Token Wrong. Communications will not continue")
+			return False
+
+
+
 	def encrypt_message(self,text,session,key=None):
 		#logger.debug("aaaaaaaaaaa",text)
 		#logger.debug(text)
@@ -285,6 +351,7 @@ class MediaServer(resource.Resource):
 
 
 	def decrypt_message(self,cryptogram,iv,session,key=None):
+		print(len(cryptogram))
 		cipher=None
 		algorithm=None
 		mode=None
@@ -320,9 +387,10 @@ class MediaServer(resource.Resource):
 		if session.cipher == 'ChaCha20': 
 			return decryptor.update(cryptogram) + decryptor.finalize()
 		else:
+			print(algorithm.block_size)
 			padded_data = decryptor.update(cryptogram) + decryptor.finalize()
 			unpadder = padding.PKCS7(algorithm.block_size).unpadder()
-			text = unpadder.update(padded_data)
+			text = unpadder.update(padded_data)	
 			text += unpadder.finalize()
 			return text
 
@@ -464,7 +532,6 @@ class MediaServer(resource.Resource):
 		nonce = data['nonce'].encode('latin')
 		client_cert = data['cert'].encode('latin')
 		session.cert = x509.load_pem_x509_certificate(client_cert)
-		print(nonce,session.cert)
 		logger.debug("Got Nonce and Client Certificate. Validating Certificate..")
 		if not self.validate_certificate(session.cert):
 			logger.debug("Client certificate is not valid!")
@@ -472,7 +539,8 @@ class MediaServer(resource.Resource):
 
 		snonce = self.sign_message(nonce)
 		nonce2=os.urandom(16)
-		print("NONCE",snonce)
+		session.nonce2 = nonce2
+		
 		message=json.dumps({
 			'snonce':snonce.decode('latin'),
 			'nonce2':nonce2.decode('latin')
@@ -490,42 +558,71 @@ class MediaServer(resource.Resource):
 		return message.encode('latin')
 
 	def verify_challenge(self,request,session,crypt,iv,key):
-
+		logger.debug("Verifing Challenge")
 		data = json.loads(self.decrypt_message(crypt,iv,session,key))
-		nonce = data['snonce'].encode('latin')
+		nonce2 = data['snonce2'].encode('latin')
 		message=None
 		key, salt = self.derive_key(session.shared_key,session)
+		#session.cert.public_key().verify(session.nonce2,nonce2, pd.PKCS1v15(), hashes.SHA1()) 
+
+		#try:
+	
+		logger.debug("Challenge OK")
+		message=json.dumps({
+			'method':'ACK'
+		}).encode('latin')
+
+		
+			#message=json.dumps({
+				#'method':'NACK'
+			#}).encode('latin')
+		
+			#logger.info("Challenge wrong. Comms Compromised")
+		session.user = 1 # TODO:SERIALNUMBER do cc
 		message,iv = self.encrypt_message(message,session,key)
-		try:
-			self.server_cert.public_key().verify(
-				crypt,
-				self.challenge_nonce,
-				pd.PSS(
-				mgf=pd.MGF1(hashes.SHA256()),
-				salt_length=pd.PSS.MAX_LENGTH),
-				hashes.SHA256()
-			)
-			logger.info("Challenge OK")
-			message=json.dumps({
-				'method':'ACK'
-			}).encode('latin')
-		
-		except:
-			message=json.dumps({
-				'method':'NACK'
-			}).encode('latin')
-		
-			logger.info("Challenge wrong. Comms Compromised")
-			
 		response = json.dumps({
 		'message':base64.b64encode(message).decode('latin'),
 		'iv':base64.b64encode(iv).decode('latin'),
 		'salt':base64.b64encode(salt).decode('latin'),
 		'hmac':base64.b64encode(self.add_hmac(message,session,key)).decode('latin')
-		})	
+		}).encode('latin')	
+		logger.debug("ns vamos ver")
 		return response			
 		
-	
+	def start_download(self,request,session,crypt,iv,key):
+		print(type(crypt),type(iv))
+		data = json.loads(self.decrypt_message(crypt,iv,session,key))
+		license=data['license'].encode('latin')
+		media_id = data['media_id'].encode('latin')
+		key, salt = self.derive_key(session.shared_key,session)
+		license = x509.load_pem_x509_certificate(license)
+		if self.validate_license(license,media_id):
+			download_token = int.from_bytes(os.urandom(16), sys.byteorder) 
+			print("token",download_token)
+			session.download_token = download_token
+			content,iv=self.encrypt_message(json.dumps({'method':'GET_TOKEN','download_token':session.download_token.decode('latin')}).encode('latin'),session,key)
+			response=json.dumps({
+				'message':base64.b64encode(content).decode('latin'),
+				'iv':base64.b64encode(iv).decode('latin'),
+				'salt':base64.b64encode(salt).decode('latin'),
+				'hmac':base64.b64encode(self.add_hmac(content,session,key)).decode('latin')
+				})
+			return response.encode('latin')
+		
+
+	def send_license(self,session,media_id):
+		cert = self.gen_license(session,media_id)
+		key, salt = self.derive_key(session.shared_key,session)
+		content,iv = self.encrypt_message(json.dumps({'method':'GET_LICENSE','license':cert.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin'),session,key)
+		response=json.dumps({'message':base64.b64encode(content).decode('latin'),
+		'iv':base64.b64encode(iv).decode('latin'),
+		'salt':base64.b64encode(salt).decode('latin'),
+		'hmac':base64.b64encode(self.add_hmac(content,session,key)).decode('latin'),
+		})
+		return response.encode('latin')
+
+
+
 	def do_post_protocols(self,request):
 		data = json.loads(request.content.getvalue())
 		method=data['method']
@@ -556,24 +653,38 @@ class MediaServer(resource.Resource):
 				iv = base64.b64decode(data[b'iv'].decode())
 				salt=base64.b64decode(data[b'salt'].decode())
 				content = base64.b64decode(data[b'content'].decode())
-				key,_=self.derive_key(session.shared_key,session,salt)
+				hmac = base64.b64decode(data[b'hmac'].decode())
+				key,_=self.derive_key(session.shared_key,session,salt)			
 				data = self.decrypt_message(content,iv,session,key).decode('latin')
 				data = json.loads(data.encode())
 				method = data.get('method')
-
+				
 
 				if method == 'GET_LIST':
-					return self.do_list(request,session)
+					if not self.verify_hmac(session,hmac,content,key):
+						logger.debug("HMAC WRONG")
+					else:
+						logger.debug("HMAC OK")
+						return self.do_list(request,session)
 				elif method == "DOWNLOAD":
 					chunk_id = data.get('chunk_id')
 					media_id = data.get('media_id')
-					print(chunk_id,media_id)
-					if media_id is None:
-						request.setResponseCode(400)
-						request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-						return json.dumps({'error': 'invalid media id'}).encode('latin')
-					return self.do_download(request,session,media_id,int(chunk_id))
-
+					token = data.get('token').encode('latin')
+					exp_token = str(session.download_counter+1).encode('latin')
+					if not self.verify_token(session,token,key):
+						logger.debug("Invalid Download token!")
+						return		#TODO:mensagem de erro
+					else:
+						print(chunk_id,media_id)
+						if media_id is None:
+							request.setResponseCode(400)
+							request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+							return json.dumps({'error': 'invalid media id'}).encode('latin')
+						session.download_token+=1
+						return self.do_download(request,session,media_id,int(chunk_id))
+				elif method == 'GET_LICENSE':
+					media_id = data.get('media_id')
+					return self.send_license(session,media_id)
 			#elif request.uri == 'api/auth':
 			#autenticaçao, later on..
 			#elif request.path == b'/api/list':
@@ -615,6 +726,7 @@ class MediaServer(resource.Resource):
 				method = data.get('method')
 				# read post body
 				data= json.loads(request.content.getvalue())
+
 				msg = base64.b64decode(data['data'])
 				iv=base64.b64decode(data['iv'])
 				hmac=base64.b64decode(data['hmac'])
@@ -627,7 +739,9 @@ class MediaServer(resource.Resource):
 					elif method == 'ACCEPT_CHALLENGE':
 						logger.debug("ACCEPT CHALLENGE")
 						return self.verify_challenge(request,session,msg,iv,key)
-
+					elif method == 'START_DOWNLOAD':
+						logger.debug("START DOWNLOAD")
+						return self.start_download(request,session,msg,iv,key)
 
 		except Exception as e:
 			logger.exception(e)
@@ -645,38 +759,3 @@ print("URL is: http://IP:8080")
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
 reactor.run()    
-
-
-'''
-
-import PyKCS11
-import binascii
-lib = '/usr/local/lib/libpteidpkcs11.so'
-pkcs11 = PyKCS11.PyKCS11Lib()
-pkcs11.load(lib)
-slots = pkcs11.getSlotList()
-for slot in slots:
-	print(pkcs11.getTokenInfo(slot))
-
-
-
-all_attr = list(PyKCS11.CKA.keys())
-#Filter attributes
-all_attr = [e for e in all_attr if isinstance(e, int)]
-session = pkcs11.openSession(slot)
-for obj in session.findObjects():
-	# Get object attributes
-	attr = session.getAttributeValue(obj, all_attr)
-	# Create dictionary with attributes
-	attr = dict(zip(map(PyKCS11.CKA.get, all_attr), attr))
-	print('Label: ', attr['CKA_LABEL'])
-
-
-
-private_key = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),(PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')])[0]
-mechanism = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
-text = b'text to sign'
-signature = bytes(session.sign(private_key, text, mechanism))
-
-
-'''

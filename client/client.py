@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.x509.oid import ExtensionOID, NameOID
 from cryptography import x509   
 import os
-from datetime import datetime 
+from datetime import datetime,timedelta 
 lib = '/usr/local/lib/libpteidpkcs11.so'
 
 logger = logging.getLogger('root')
@@ -34,7 +34,13 @@ logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
 
 SERVER_URL = 'http://127.0.0.1:8080'
+class License:
 
+	def __init__(self,media_id,start_date,end_date):
+		self.start_date = start_date
+		self.end_date = end_date
+		self.media_id=media_id
+	
 
 class Client:
 	def __init__(self):
@@ -42,7 +48,7 @@ class Client:
 
 		self.ciphers = ['AES', '3DES', 'ChaCha20']
 		self.digests = ['SHA-512', 'SHA-256']
-		self.ciphermodes = ['CBC', 'CTR', 'GCM']
+		self.ciphermodes = ['CBC', 'CTR']
 		self.srvr_publickey = None
 		self.cipher = None
 		self.digest = None
@@ -56,7 +62,7 @@ class Client:
 		self.load_certs('../lixo/')
 		self.load_crl('../lixo/')
 		self.read_cc()
-
+		self.licenses = {} # media_id : certificate 
 
 	#1- ler toda a chain de certificados até a um certificado auto assinado
 	#2- para cada certificado nessa chain tratar da validação:
@@ -64,6 +70,19 @@ class Client:
 		#b)- ver crls 
 		#c)- verificar a assinatura
 	#def load_c
+	
+	def digest_token(self,content):
+		"""
+		Create a digest over the download token received by the server
+		"""
+		digest = None
+		if self.digest == 'SHA-512':
+			digest = hashes.Hash(hashes.SHA512())			
+		elif self.digest == 'SHA-256':
+			digest = hashes.Hash(hashes.SHA256())
+		
+		digest.udpdate(content)
+		return digest.finalize()
 		
 	def validate_certificate(self, certificate):
 		dates = (certificate.not_valid_before.timestamp(),certificate.not_valid_after.timestamp())
@@ -370,19 +389,20 @@ class Client:
 		
 		self.certificate=x509.load_der_x509_certificate(bytes(attr['CKA_VALUE']))
 
+
 		#cc_num = self.cc_cert.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
-		self.private_key_cc = self.session.findObjects([
-                (PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
-                (PyKCS11.CKA_LABEL,'CITIZEN AUTHENTICATION KEY')]
-            )[0]
+		self.private_key_cc = self.session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY), (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')])[0]
 		self.mechanism = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
 		
-	
+
 
 
 
 	def sign_message(self,text):
-		signature = bytes(self.session.sign(self.private_key_cc, text, self.mechanism))
+		texto=b"naaosei"
+		mech = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
+		signature = bytes(self.session.sign(self.private_key_cc, text, mech))
+		#self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
 		return signature
 
 	def chunk_identification(self, chunk_id, media_id):
@@ -437,6 +457,7 @@ class Client:
 			message=json.loads(message)
 			nonce=message['snonce'].encode('latin')
 			nonce2=message['nonce2'].encode('latin')
+			print("NONCE2",nonce)
 			if self.verify_challenge(nonce):
 				self.accept_challenge(nonce2)
 		
@@ -461,6 +482,7 @@ class Client:
 
 	def accept_challenge(self,nonce2):
 		logger.info("Sending POST to accept Challenge")
+
 		snonce2=self.sign_message(nonce2)
 		self.challenge_nonce2 = snonce2
 		key, salt = self.derive_key(self.shared_key)
@@ -473,13 +495,14 @@ class Client:
 				'salt':base64.b64encode(salt),
 				'session_id': str(self.session_id)
 			}
-		message = json.dumps({'snonce':snonce2.decode('latin')})
+		message = json.dumps({'snonce2':snonce2.decode('latin')}).encode('latin')
 		data,iv = self.encrypt_message(message,key)
 		logger.info("Sucessfuly encrypted challenge and certificate")
 		message = {'data':base64.b64encode(data),'iv':base64.b64encode(iv),'hmac':base64.b64encode(self.add_hmac(data,key))}
 		logger.info("Sending POST Challenge")
 		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
-
+		logger.info("teste")
+		print(request.text)
 		response = json.loads(request.text)
 		iv =base64.b64decode(response['iv'])
 		hmac=base64.b64decode(response['hmac'])
@@ -548,7 +571,8 @@ class Client:
 				'content':base64.b64encode(message),
 				'iv':base64.b64encode(iv),
 				'salt':base64.b64encode(salt),
-				'session_id': str(self.session_id)
+				'session_id': str(self.session_id),
+				'hmac':base64.b64encode(self.add_hmac(message,key))
 			}
 		logger.info("get list")
 
@@ -592,8 +616,88 @@ class Client:
 		# Example: Download first file
 		media_item = media_list[selection]
 		return media_item
+
+	def get_new_license(self,media_id):
+		payload=None
+		if self.session_id!=None:
+			key, salt = self.derive_key(self.shared_key)
+			message, iv = self.encrypt_message(json.dumps({'method': 'GET_LICENSE','media_id':media_id}).encode('latin'),key)
+			headers = {
+				'content':base64.b64encode(message),
+				'iv':base64.b64encode(iv),
+				'salt':base64.b64encode(salt),
+				'session_id': str(self.session_id),
+				'hmac':base64.b64encode(self.add_hmac(message,key))
+			}
+			req = requests.get(f'{SERVER_URL}/api',headers=headers)
+
+
 			
-	
+			logger.info("Got new License")
+			##response
+			response = json.loads(req.text)
+			salt = base64.b64decode(response['salt'])
+			key,_=self.derive_key(self.shared_key,salt)
+			
+			iv =base64.b64decode(response['iv'])
+			hmac=base64.b64decode(response['hmac'])
+			msg = base64.b64decode(response['message'])
+			message = json.loads(self.decrypt_message(msg,iv,key))
+			license = message['license']
+			self.licenses['media_id'] = x509.load_pem_x509_certificate(license.encode('latin'))
+			if not self.verify_hmac(hmac,msg,key):
+				logger.info("HMAC IS WRONG...")
+			else:
+				self.start_download(media_id)
+
+
+
+	def start_download(self,media_id):
+
+		license = self.licenses.get('media_id')
+		if license == None:
+			self.get_new_license(media_id)
+		else:
+			license=license.public_bytes(serialization.Encoding.PEM).decode('latin')
+		print(license)
+		
+		key, salt = self.derive_key(self.shared_key)
+		#TODO: mudar isto para outro get
+		message, iv = self.encrypt_message(json.dumps({'method': 'START_DOWNLOAD'}).encode('latin'),key)
+		headers = {
+				'Content-Type': 'application/json',
+				'content':base64.b64encode(message),
+				'iv':base64.b64encode(iv),
+				'salt':base64.b64encode(salt),
+				'session_id': str(self.session_id),
+			}
+		
+		message,iv = self.encrypt_message(json.dumps({'license':license,'media_id':media_id}).encode('latin'),key)
+		message = {'data':base64.b64encode(message),'iv':base64.b64encode(iv),'hmac':base64.b64encode(self.add_hmac(message,key))}
+		req = requests.post(f'{SERVER_URL}/api',json=message,headers=headers)
+		response = json.loads(req.text)
+		#headers
+		iv =base64.b64decode(response['iv'])
+		hmac=base64.b64decode(response['hmac'])
+		salt = base64.b64decode(response['salt'])
+		msg = base64.b64decode(response['message'])
+		
+		key, _ = self.derive_key(self.shared_key,salt)
+		if not self.verify_hmac(hmac,msg,key):
+			logger.info("HMAC IS WRONG...")
+		else:
+			#logger.info("HMAC OK")
+			message = json.loads(self.decrypt_message(msg,iv,key))
+			method = message['method']
+			#if method == 'GET_LICENSE':
+				
+				#return self.start_download(media_id)
+			if method == 'GET_TOKEN':
+				counter=message['download_token']
+				logger.info("Server validated license, able to start the download")
+				logger.info(counter)
+				self.download_counter = int(counter)
+				
 
 
 def main():
@@ -652,6 +756,7 @@ def main():
 		'session_id': str(client.session_id)
 	}
 
+	client.start_download(media_item['id'])
 	'''
 		
 	'''
@@ -660,7 +765,9 @@ def main():
 		payload=None
 		if client.session_id!=None:
 			key1, salt1 = client.derive_key(client.shared_key)
-			message, iv = client.encrypt_message(json.dumps({'method': 'DOWNLOAD','chunk_id':chunk,'media_id':media_item['id']}).encode('latin'),key1)
+			token = client.add_hmac(str((client.download_counter+1)).encode('latin'),key1).decode('latin')
+			client.download_counter+=1
+			message, iv = client.encrypt_message(json.dumps({'method': 'DOWNLOAD','chunk_id':chunk,'media_id':media_item['id'],'token':token}).encode('latin'),key1)
 			headers = {
 				'content':base64.b64encode(message),
 				'iv':base64.b64encode(iv),
