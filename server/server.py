@@ -74,7 +74,39 @@ class MediaServer(resource.Resource):
 		self.sessions={}
 		self.certificate = self.load_cert('../lixo/sio_server.crt')
 		self.load_priv_key('../lixo/sio_server.pem')
+		self.encrypt_catalog('./catalog')
 		self.licenses = {}		# media_id : list(user)	
+
+
+	def encrypt_catalog(self,path):
+		kdf = PBKDF2HMAC(
+			algorithm=hashes.SHA256(),
+			length=32,
+			salt=None,
+			iterations=10000,
+		)
+		key=kdf.derive(b"password")
+		key=key[:16]
+		algorithm=algorithms.AES(key[:16])
+		iv=os.urandom(16)
+		mode= modes.CBC(iv)
+		try:
+			with os.scandir(path) as it:
+				for entry in it:
+					if entry.is_file():
+						with open(path + entry.name,'rb') as f:
+							data=f.read()
+							padder = padding.PKCS7(algorithm.block_size).padder()
+							padded_data = padder.update(data)
+							padded_data += padder.finalize()
+							cipher = Cipher(algorithm, mode=mode)  
+							encryptor = cipher.encryptor()
+							cryptogram = encryptor.update(padded_data) + encryptor.finalize()
+							
+
+
+
+
 
 
 	def check_session_id(self,args):
@@ -116,6 +148,7 @@ class MediaServer(resource.Resource):
 		print(signature)
 		return signature
 
+	
 	def validate_license(self,license,media_id):
 		""" Checks if license is up to date and if it is equal to the server """
 		now = datetime.now().timestamp()
@@ -517,6 +550,8 @@ class MediaServer(resource.Resource):
 			if method =='KEY_EXCHANGE':
 				logger.debug('Confirmed the exchange of a key')
 				received_key=data['pub_key'].encode()
+				#received_key = self.sign_message(received_key)
+				logger.debug(received_key)
 				session.client_pub_key=load_pem_public_key(received_key)
 				session.shared_key = session.private_key.exchange(session.client_pub_key)
 				message = {'method':'ACK'}
@@ -598,7 +633,6 @@ class MediaServer(resource.Resource):
 		license = x509.load_pem_x509_certificate(license)
 		if self.validate_license(license,media_id):
 			download_token = int.from_bytes(os.urandom(16), sys.byteorder) 
-			print("token",download_token)
 			session.download_token = download_token
 			content,iv=self.encrypt_message(json.dumps({'method':'GET_TOKEN','download_token':session.download_token.decode('latin')}).encode('latin'),session,key)
 			response=json.dumps({

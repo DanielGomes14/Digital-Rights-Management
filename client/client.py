@@ -255,7 +255,18 @@ class Client:
 		""" Exchange keys with the server"""
 		
 		logger.info('Sending POST Request to exchange DH Shared key')
-		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+		'''
+		keyt = self.server_cert.public_key().encrypt(
+			key,
+			pd.OAEP(
+			mgf=pd.MGF1(algorithm=hashes.SHA256()),
+			algorithm=hashes.SHA256(),
+			label=None
+		)
+		)
+		logger.info(key)
+		'''
 		data = {
 			'method': 'KEY_EXCHANGE',
 			'pub_key': key
@@ -374,7 +385,7 @@ class Client:
 		self.slots =pkcs11.getSlotList()
 		for slot in self.slots:
 			print(pkcs11.getTokenInfo(slot))
-
+		#slot=pkcs11.getSlotList(tokenPresent=Tru)[0]
 		self.session=pkcs11.openSession(slot)
 		all_attr = list(PyKCS11.CKA.keys())
 		#Filter attributes
@@ -390,7 +401,8 @@ class Client:
 		self.certificate=x509.load_der_x509_certificate(bytes(attr['CKA_VALUE']))
 
 
-		#cc_num = self.cc_cert.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
+		cc_num = self.certificate.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
+		print(cc_num)
 		self.private_key_cc = self.session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY), (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')])[0]
 		self.mechanism = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
 		
@@ -399,10 +411,9 @@ class Client:
 
 
 	def sign_message(self,text):
-		texto=b"naaosei"
 		mech = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
 		signature = bytes(self.session.sign(self.private_key_cc, text, mech))
-		#self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
+		self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
 		return signature
 
 	def chunk_identification(self, chunk_id, media_id):
