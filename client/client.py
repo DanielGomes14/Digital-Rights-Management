@@ -46,56 +46,36 @@ class Client:
 	def __init__(self):
 		"""Representation of the client."""
 
-		self.ciphers = ['AES', '3DES', 'ChaCha20']
-		self.digests = ['SHA-512', 'SHA-256']
-		self.ciphermodes = ['CBC', 'CTR']
-		self.srvr_publickey = None
-		self.cipher = None
-		self.digest = None
-		self.ciphermode = None
-		self.key_sizes = {'3DES': [192, 168, 64],
-			'AES': [256, 192, 128], 'ChaCha20': [256]}
-		self.dh_parameters = None
-		self.trusting_chain=[]
-		self.issuers_certs={}
+		self.ciphers = ['AES', '3DES', 'ChaCha20']			#available ciphers
+		self.digests = ['SHA-512', 'SHA-256']				#available digests
+		self.ciphermodes = ['CBC', 'CTR']					#available modes
+		self.srvr_publickey = None							
+		self.cipher = None									#current cipher
+		self.digest = None									#current digest
+		self.ciphermode = None								#current mode
+		self.dh_parameters = None							
+		self.trusting_chain=[]								#server certificate chain
+		self.issuers_certs={}								#CA certificates
 		self.crls_list=[]
 		self.load_certs('../lixo/')
 		self.load_crl('../lixo/')
 		self.read_cc()
-		self.licenses = {} # media_id : certificate 
+		self.licenses = {} 									# media_id : certificate 
 
-	#1- ler toda a chain de certificados até a um certificado auto assinado
-	#2- para cada certificado nessa chain tratar da validação:
-		#a)- ver datas (validate_certificate)
-		#b)- ver crls 
-		#c)- verificar a assinatura
-	#def load_c
 	
-	def digest_token(self,content):
-		"""
-		Create a digest over the download token received by the server
-		"""
-		digest = None
-		if self.digest == 'SHA-512':
-			digest = hashes.Hash(hashes.SHA512())			
-		elif self.digest == 'SHA-256':
-			digest = hashes.Hash(hashes.SHA256())
-		
-		digest.udpdate(content)
-		return digest.finalize()
-		
 	def validate_certificate(self, certificate):
+		"""Verifies if the certificate is up to date """
+		
 		dates = (certificate.not_valid_before.timestamp(),certificate.not_valid_after.timestamp())
 		date_now=datetime.now().timestamp()
 		return dates[0]< date_now < dates[1]
 
 	def validate_server_purpose(self,certificate):
-		logger.info("Validating Server Purpose")
+		"""Validates the server certificate purpose  """
+
 		server_auth=x509.oid.ExtendedKeyUsageOID.SERVER_AUTH
 		extended_key_usages = certificate.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
 		return any(extension for extension in extended_key_usages.value if extension.dotted_string == server_auth.dotted_string)
-	
-	
 	
 	def validate_signature(self,issuer,subject):
 		"""
@@ -115,6 +95,25 @@ class Client:
 		except:
 			logger.info("Could not Validate the Signature of the Certificate")
 			return False
+	
+	def validate_server_signature(self,recv_key,signature):
+		"""
+		Validate if the server public key for Diffie Hellmann is valid, in order to avoid MiTM
+		"""
+		try:
+			self.server_cert.public_key().verify(
+				signature,
+				recv_key,
+				pd.PSS(
+				mgf=pd.MGF1(hashes.SHA256()),
+				salt_length=pd.PSS.MAX_LENGTH
+				),hashes.SHA256()
+			)
+			logger.info("Server Signature OK")
+			return True
+		except:
+			logger.info("Server Signature Wrong")
+
 
 
 	def crl_validation(self,cert):
@@ -123,6 +122,8 @@ class Client:
 	
 
 	def validate_cert_chain(self):
+		"""Checks if the server certificate chain is valid """
+
 		chain = self.trusting_chain
 		if len(self.trusting_chain) <= 1:
 			return False 
@@ -138,7 +139,7 @@ class Client:
 		return True 
 
 	def load_certs(self,path):
-	
+		"""Loads Certificates from disk"""
 		try:
 			with os.scandir(path) as it:
 				for entry in it:
@@ -155,6 +156,7 @@ class Client:
 	
 	
 	def load_crl(self,path):
+		"""Loads CRLs from disk"""
 		try:
 			with os.scandir(path) as it:
 				for entry in it:
@@ -170,6 +172,7 @@ class Client:
 
 
 	def build_cert_chain(self,certificate):
+		"""Builds the certificate chain of a given certificate"""
 		chain = []
 		last = None
 		logger.info("Starting to build trusting chain..")
@@ -193,9 +196,15 @@ class Client:
 		self.trusting_chain = chain
 
 	def has_negotiated(self):
+		"""Checks if the client has already negotiated algs"""
 		return not (self.cipher is None or self.digest is None)
 
 	def negotiate_algs(self):
+		"""
+		Negotiates algorithms with the server
+		Sends all the available algorithms and waits for the server to choose one
+		"""
+
 		data = {
 			'method': "NEGOTIATE_ALG",
 			'ciphers': self.ciphers,
@@ -205,19 +214,19 @@ class Client:
 		request = requests.post(f'{SERVER_URL}/api/protocols',json=data, headers={'Content-Type': 'application/json'})
 		response = json.loads(request.text)
 		
-		if response['method'] == 'ALG_ERROR':
+		if response['method'] == 'NACK':
 			logger.info('ERROR NEGOTIATING ALGORITHMS')
 		else:
-			logger.info(' NEGOTIATED ALGORITHMS WITH SUCCESS')
+			logger.info('NEGOTIATED ALGORITHMS WITH SUCCESS')
 			self.session_id=response['id']
 			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
 			cert = base64.b64decode(response['cert'])
 			cert = x509.load_pem_x509_certificate(cert)
 			self.build_cert_chain(cert)
-			logger.info(self.trusting_chain)
 			if self.validate_cert_chain() and self.validate_server_purpose(cert):
-				logger.info("Server Certificate is Ok")
+				logger.info("Server Certificate OK")
 				self.server_cert = cert
+				self.state = 'NEGOTIATE_ALG'
 			else:
 				logger.info("Certificate is not valid")
 				exit(1)		# TODO: ver
@@ -247,8 +256,15 @@ class Client:
 		self.public_key = self.private_key.public_key()
 		
 		#stores server public key
-		received_key = data['pub_key'].encode()
+		received_key = data['pub_key'].encode('latin')
 		self.srvr_publickey = load_pem_public_key(received_key)
+		signature  = data['signature'].encode('latin')
+		if self.validate_server_signature(received_key,signature):
+			self.state = 'DH_START'
+			logger.info("Signatures OK")
+		else:
+			logger.info("Signatures wrong")
+
 		
 
 	def dh_exchange_key(self):
@@ -256,17 +272,7 @@ class Client:
 		
 		logger.info('Sending POST Request to exchange DH Shared key')
 		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-		'''
-		keyt = self.server_cert.public_key().encrypt(
-			key,
-			pd.OAEP(
-			mgf=pd.MGF1(algorithm=hashes.SHA256()),
-			algorithm=hashes.SHA256(),
-			label=None
-		)
-		)
-		logger.info(key)
-		'''
+
 		data = {
 			'method': 'KEY_EXCHANGE',
 			'pub_key': key
@@ -282,19 +288,14 @@ class Client:
 			logger.info('Could not exchange a key with the server')
 
 
-	def encrypt_message(self, text,key=None):
+	def encrypt_message(self, text,key):
+		"""Encrypts message with a symmetric key"""
 		iv = os.urandom(16)
 		cipher=None
 		algorithm,iv=None,None
 		mode=None
-		if key==None:
-			key=self.shared_key
-		size=self.key_sizes[self.cipher][0]
-		enc_shared_key=key[:size//8]
-		#encryptor = cipher.encryptor()
-		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
-		#decryptor = cipher.decryptor()
-		#decryptor.update(ct) + decryptor.finalize()
+		
+		enc_shared_key=key[len(key)//2:]
 		if self.cipher == 'AES':
 			algorithm = algorithms.AES(enc_shared_key)
 		elif self.cipher == '3DES':
@@ -315,25 +316,19 @@ class Client:
 			padder = padding.PKCS7(algorithm.block_size).padder()
 			padded_data = padder.update(text)
 			padded_data += padder.finalize()
-		print(algorithm,mode)
 		cipher = Cipher(algorithm, mode=mode)
 		encryptor = cipher.encryptor()
 		cryptogram = encryptor.update(padded_data) + encryptor.finalize()
 
 		return cryptogram, iv
 
-	def decrypt_message(self, cryptogram, iv, key=None):
-		if key == None:
-			key = self.shared_key
+	def decrypt_message(self, cryptogram, iv,key):
+		"""Decrypts messages with a symmetric key"""
+
 		cipher = None
 		algorithm = None
 		mode = None
-		size = self.key_sizes[self.cipher][0]
-		enc_shared_key = key[:size//8]
-		#encryptor = cipher.encryptor()
-		#ct = encryptor.update(b"a secret message") + encryptor.finalize()
-		#decryptor = cipher.decryptor()
-		#decryptor.update(ct) + decryptor.finalize()
+		enc_shared_key=key[len(key)//2:]
 		if self.cipher == 'AES':
 			algorithm = algorithms.AES(enc_shared_key)
 		elif self.cipher == '3DES':
@@ -364,21 +359,11 @@ class Client:
 			return text
 
 	
-	def add_hmac(self, message, key=None):
-		if key == None:
-			key = self.shared_key
-		msg_bytes = None
-		if self.digest == 'SHA-512':
-			h = hmac.HMAC(key, hashes.SHA512())
-			h.update(message)
-			msg_bytes = h.finalize()
-		elif self.digest == 'SHA-256':
-			h = hmac.HMAC(key, hashes.SHA256())
-			h.update(message)
-			msg_bytes = h.finalize()
-		return msg_bytes
+	
 
 	def read_cc(self):
+		"""Reads citizen card certificates and private key"""
+
 		print("-------+---------")
 		pkcs11 = PyKCS11.PyKCS11Lib()
 		pkcs11.load(lib)
@@ -387,36 +372,26 @@ class Client:
 			print(pkcs11.getTokenInfo(slot))
 		#slot=pkcs11.getSlotList(tokenPresent=Tru)[0]
 		self.session=pkcs11.openSession(slot)
-		all_attr = list(PyKCS11.CKA.keys())
-		#Filter attributes
-		all_attr = [e for e in all_attr if isinstance(e, int)]
-		self.session = pkcs11.openSession(slot)
-		for obj in self.session.findObjects():
-			# Get object attributes
-			attr = self.session.getAttributeValue(obj, all_attr)
-			# Create dictionary with attributes
-			attr = dict(zip(map(PyKCS11.CKA.get, all_attr), attr))
-			#print('Label: ', attr['CKA_LABEL'])
-		
-		self.certificate=x509.load_der_x509_certificate(bytes(attr['CKA_VALUE']))
-
-
+		all_attributes = list(PyKCS11.CKA.keys())
+		all_attributes = [e for e in all_attributes if isinstance(e, int)]
+		obj = self.session.findObjects([(PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION CERTIFICATE')])[0]
+		attributes = self.session.getAttributeValue(obj, all_attributes)
+		attributes = dict(zip(map(PyKCS11.CKA.get, all_attributes), attributes))
+		self.certificate=x509.load_der_x509_certificate(bytes(attributes['CKA_VALUE']))
 		cc_num = self.certificate.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
-		print(cc_num)
 		self.private_key_cc = self.session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY), (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')])[0]
 		self.mechanism = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
-		
-
-
 
 
 	def sign_message(self,text):
+		"""Signs message with private key"""
 		mech = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
 		signature = bytes(self.session.sign(self.private_key_cc, text, mech))
 		self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
 		return signature
 
 	def chunk_identification(self, chunk_id, media_id):
+		"""Generates a digest that identifies the given chunk and media"""
 		chunk_id = str(chunk_id)
 		final_id =(self.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
 		algorithm=None
@@ -438,21 +413,29 @@ class Client:
 		self.challenge_nonce = nonce
 		key, salt = self.derive_key(self.shared_key)
 		if self.session_id!=None:
-					message, iv = self.encrypt_message(json.dumps({'method': 'START_CHALLENGE'}).encode('latin'),key)
-					headers = {
-						'Content-Type': 'application/json',
-						'content':base64.b64encode(message),
-						'iv':base64.b64encode(iv),
-						'salt':base64.b64encode(salt),
-						'session_id': str(self.session_id)
-						}
-		print(nonce)
-		message = json.dumps({'nonce':nonce.decode('latin'), 'cert':self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin')
+			headers = {
+				'Content-Type': 'application/json',
+				'session_id' : str(self.session_id)
+				}	
+		message = json.dumps({
+			'method': 'START_CHALLENGE',
+			'nonce':nonce.decode('latin'), 
+			'cert':self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin')
+		}).encode('latin')		
 		data,iv = self.encrypt_message(message,key)
+		
 		logger.info("Sucessfuly encrypted challenge and certificate")
-		message = {'data':base64.b64encode(data),'iv':base64.b64encode(iv),'hmac':base64.b64encode(self.add_hmac(data,key))}
+		
+		message = {
+			'data':base64.b64encode(data),
+			'iv':base64.b64encode(iv),
+			'hmac':base64.b64encode(self.add_hmac(data,key)),
+			'salt':base64.b64encode(salt)
+		}
+		
 		logger.info("Sending POST Challenge and CLient Certificate")
 		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
+		
 		response = json.loads(request.text)
 		iv =base64.b64decode(response['iv'])
 		hmac=base64.b64decode(response['hmac'])
@@ -468,7 +451,6 @@ class Client:
 			message=json.loads(message)
 			nonce=message['snonce'].encode('latin')
 			nonce2=message['nonce2'].encode('latin')
-			print("NONCE2",nonce)
 			if self.verify_challenge(nonce):
 				self.accept_challenge(nonce2)
 		
@@ -476,6 +458,7 @@ class Client:
 
 
 	def verify_challenge(self,crypt):
+		"""Verifies the server response to the challenge"""
 		try:
 			self.server_cert.public_key().verify(
 				crypt,
@@ -492,28 +475,33 @@ class Client:
 			return False
 
 	def accept_challenge(self,nonce2):
+		"""Accepts Server challenge and sends signed Nonce"""
 		logger.info("Sending POST to accept Challenge")
 
 		snonce2=self.sign_message(nonce2)
 		self.challenge_nonce2 = snonce2
 		key, salt = self.derive_key(self.shared_key)
 		if self.session_id!=None:
-			message, iv = self.encrypt_message(json.dumps({'method': 'ACCEPT_CHALLENGE'}).encode('latin'),key)
 			headers = {
 				'Content-Type': 'application/json',
-				'content':base64.b64encode(message),
-				'iv':base64.b64encode(iv),
-				'salt':base64.b64encode(salt),
 				'session_id': str(self.session_id)
 			}
-		message = json.dumps({'snonce2':snonce2.decode('latin')}).encode('latin')
+		
+		message = json.dumps({'method': 'ACCEPT_CHALLENGE','snonce2':snonce2.decode('latin')}).encode('latin')
 		data,iv = self.encrypt_message(message,key)
+		
 		logger.info("Sucessfuly encrypted challenge and certificate")
-		message = {'data':base64.b64encode(data),'iv':base64.b64encode(iv),'hmac':base64.b64encode(self.add_hmac(data,key))}
+		message = {
+			'data':base64.b64encode(data),
+			'iv':base64.b64encode(iv),
+			'salt':base64.b64encode(salt),
+			'hmac':base64.b64encode(self.add_hmac(data,key))		
+		}
+
+
 		logger.info("Sending POST Challenge")
 		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
 		logger.info("teste")
-		print(request.text)
 		response = json.loads(request.text)
 		iv =base64.b64decode(response['iv'])
 		hmac=base64.b64decode(response['hmac'])
@@ -534,7 +522,8 @@ class Client:
 				exit(1)
 		
 
-	def derive_key(self, data, salt=None): 
+	def derive_key(self, data, salt=None):
+		"""Derives key from a given data""" 
 		digest=None
 		if salt==None:
 			salt=os.urandom(16)
@@ -542,19 +531,37 @@ class Client:
 			digest = hashes.SHA512()
 		elif self.digest == 'SHA-256':
 			digest =hashes.SHA256()
-		
+
+		key_size = 32
+		if self.cipher=='3DES': 
+			key_size = 16
 		# derive
 		kdf = PBKDF2HMAC(
 			algorithm=digest,
-			length=32,
+			length=key_size*2	,
 			salt=salt,
 			iterations=10000,
 		)
 		key = kdf.derive(data)
 		return key,salt
 
+	def add_hmac(self, message, key):
+		"""Calculates the hmac of a given message"""
+		msg_bytes = None
+		enc_shared_key = key[:len(key)//2]
+		if self.digest == 'SHA-512':
+			h = hmac.HMAC(enc_shared_key, hashes.SHA512())
+			h.update(message)
+			msg_bytes = h.finalize()
+		elif self.digest == 'SHA-256':
+			h = hmac.HMAC(enc_shared_key, hashes.SHA256())
+			h.update(message)
+			msg_bytes = h.finalize()
+		return msg_bytes
 
 	def verify_hmac(self, recv_hmac, crypto, key=None):
+		"""Verifies the integrity of a message"""
+
 		if key == None:
 			key = self.shared_key
 		h = None
@@ -563,8 +570,8 @@ class Client:
 			digest = hashes.SHA512()
 		elif self.digest == 'SHA-256':
 			digest = hashes.SHA256()
-		size = self.key_sizes[self.cipher][0]
-		h = hmac.HMAC(key[:size//8], digest)
+		#size = self.key_sizes[self.cipher][0]
+		h = hmac.HMAC(key[:len(key)//2], digest)
 		h.update(crypto)
 		try:
 			h.verify(recv_hmac)
@@ -574,6 +581,7 @@ class Client:
 			return False
 
 	def get_list(self):
+		
 		payload=None
 		if self.session_id!=None:
 			key, salt = self.derive_key(self.shared_key)
@@ -594,12 +602,15 @@ class Client:
 		data = json.loads(req.text)
 		cryptogram = base64.b64decode(data['cryptogram'])
 		iv = base64.b64decode(data['iv'])
+		salt = base64.b64decode(data['salt'])
+		key,_ = self.derive_key(self.shared_key,salt)
 		hmac = base64.b64decode(data['hmac'])
+
 		logger.info("verifying hmac..")
-		verif = self.verify_hmac(hmac, cryptogram)
+		verif = self.verify_hmac(hmac, cryptogram,key)
 		if verif:
 			logger.info("HMAC OK")
-			media_list = json.loads(self.decrypt_message(cryptogram, iv))
+			media_list = json.loads(self.decrypt_message(cryptogram, iv,key))
 			return media_list
 		else:
 			logger.info("HMAC Wrong. Communications Compromised")
@@ -659,7 +670,7 @@ class Client:
 			if not self.verify_hmac(hmac,msg,key):
 				logger.info("HMAC IS WRONG...")
 			else:
-				self.start_download(media_id)
+				return self.start_download(media_id)
 
 
 
@@ -667,27 +678,34 @@ class Client:
 
 		license = self.licenses.get('media_id')
 		if license == None:
-			self.get_new_license(media_id)
-		else:
-			license=license.public_bytes(serialization.Encoding.PEM).decode('latin')
-		print(license)
+			return self.get_new_license(media_id)
+			
+		license=license.public_bytes(serialization.Encoding.PEM).decode('latin')
 		
 		key, salt = self.derive_key(self.shared_key)
-		#TODO: mudar isto para outro get
-		message, iv = self.encrypt_message(json.dumps({'method': 'START_DOWNLOAD'}).encode('latin'),key)
 		headers = {
-				'Content-Type': 'application/json',
-				'content':base64.b64encode(message),
-				'iv':base64.b64encode(iv),
-				'salt':base64.b64encode(salt),
-				'session_id': str(self.session_id),
-			}
+			'Content-Type': 'application/json',				
+			'session_id': str(self.session_id)
+		}
 		
-		message,iv = self.encrypt_message(json.dumps({'license':license,'media_id':media_id}).encode('latin'),key)
-		message = {'data':base64.b64encode(message),'iv':base64.b64encode(iv),'hmac':base64.b64encode(self.add_hmac(message,key))}
+		data,iv = self.encrypt_message(json.dumps({
+			'method': 'START_DOWNLOAD',
+			'license':license,
+			'media_id':media_id
+		}).encode('latin'),key)
+		
+		message = {
+			'data':base64.b64encode(data),
+			'iv':base64.b64encode(iv),
+			'salt':base64.b64encode(salt),
+			'hmac':base64.b64encode(self.add_hmac(data,key))
+		}
+
+		logger.info("sending post to start download")
 		req = requests.post(f'{SERVER_URL}/api',json=message,headers=headers)
+
+		
 		response = json.loads(req.text)
-		#headers
 		iv =base64.b64decode(response['iv'])
 		hmac=base64.b64decode(response['hmac'])
 		salt = base64.b64decode(response['salt'])
@@ -697,18 +715,15 @@ class Client:
 		if not self.verify_hmac(hmac,msg,key):
 			logger.info("HMAC IS WRONG...")
 		else:
-			#logger.info("HMAC OK")
 			message = json.loads(self.decrypt_message(msg,iv,key))
 			method = message['method']
-			#if method == 'GET_LICENSE':
-				
-				#return self.start_download(media_id)
-			if method == 'GET_TOKEN':
-				counter=message['download_token']
-				logger.info("Server validated license, able to start the download")
-				logger.info(counter)
-				self.download_counter = int(counter)
-				
+			if method == 'ACK':
+				logger.info("Server validated the license")
+				self.state = 'DOWNLOADING'
+				return True
+			else:
+				logger.info("Server did not validade the license")			
+				return False
 
 
 def main():
@@ -742,13 +757,13 @@ def main():
 	media_list=None
 	if client.shared_key!=None:
 		media_list=client.get_list()
-		print(media_list)
+		#print(media_list)
 	
 	#media_list = req.json()
 	media_item=None
 	if media_list != None:
 		media_item=client.list_media_content(media_list)
-		print(media_item)
+		#print(media_item)
 	# Present a simple selection menu
 
 	print(f"Playing {media_item['name']}")
@@ -767,23 +782,20 @@ def main():
 		'session_id': str(client.session_id)
 	}
 
-	client.start_download(media_item['id'])
-	'''
-		
-	'''
-
+	if not client.start_download(media_item['id']):
+		return 
+	
 	for chunk in range(media_item['chunks'] + 1):
 		payload=None
 		if client.session_id!=None:
 			key1, salt1 = client.derive_key(client.shared_key)
-			token = client.add_hmac(str((client.download_counter+1)).encode('latin'),key1).decode('latin')
-			client.download_counter+=1
-			message, iv = client.encrypt_message(json.dumps({'method': 'DOWNLOAD','chunk_id':chunk,'media_id':media_item['id'],'token':token}).encode('latin'),key1)
+			message, iv = client.encrypt_message(json.dumps({'method': 'DOWNLOAD','chunk_id':chunk,'media_id':media_item['id']}).encode('latin'),key1)
 			headers = {
 				'content':base64.b64encode(message),
 				'iv':base64.b64encode(iv),
 				'salt':base64.b64encode(salt1),
-				'session_id': str(client.session_id)
+				'session_id': str(client.session_id),
+				'hmac':base64.b64encode(client.add_hmac(message,key1))
 			}
 
 		req = requests.get(f'{SERVER_URL}/api',headers=headers)
