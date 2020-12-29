@@ -77,6 +77,8 @@ class Client:
 		extended_key_usages = certificate.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
 		return any(extension for extension in extended_key_usages.value if extension.dotted_string == server_auth.dotted_string)
 	
+
+
 	def validate_signature(self,issuer,subject):
 		"""
 		Validate the Signature of a Certificate
@@ -95,6 +97,9 @@ class Client:
 		except:
 			logger.info("Could not Validate the Signature of the Certificate")
 			return False
+	
+
+
 	
 	def validate_server_signature(self,recv_key, signature):
 		"""
@@ -128,6 +133,10 @@ class Client:
 		if len(self.trusting_chain) <= 1:
 			return False 
 		for i in range(0, len(chain) - 1):
+
+			if not self.validate_certificate(chain[i]):
+				return False
+
 			#verifies if the signatures are valid 
 			if not self.validate_signature(chain[i+1], chain[i]):
 				return False
@@ -164,7 +173,7 @@ class Client:
 						with open(path + entry.name,'rb') as f:
 							crl_data = f.read()
 							crl = x509.load_der_x509_crl(crl_data)
-							crls_list.append(crl)
+							self.crls_list.append(crl)
 						
 				logger.info("Certicates loaded!")
 		except:
@@ -212,6 +221,9 @@ class Client:
 			'ciphermodes': self.ciphermodes
 		}
 		request = requests.post(f'{SERVER_URL}/api/protocols',json=data, headers={'Content-Type': 'application/json'})
+
+
+
 		response = json.loads(request.text)
 		
 		if response['method'] == 'NACK':
@@ -515,6 +527,8 @@ class Client:
 			data, iv = self.encrypt_message(message,key)
 			
 			logger.info("Sucessfuly encrypted challenge and certificate")
+
+			
 			message = {
 				'data': base64.b64encode(data),
 				'iv': base64.b64encode(iv),
@@ -612,14 +626,17 @@ class Client:
 			payload=None
 			if self.session_id!=None:
 				key, salt = self.derive_key(self.shared_key)
-				message, iv = self.encrypt_message(json.dumps({'method': 'GET_LIST'}).encode('latin'),key)
+				data=json.dumps({'method': 'GET_LIST'}).encode('latin')
+				data, iv = self.encrypt_message(data,key)
 				headers = {
-					'content':base64.b64encode(message),
+					'content':base64.b64encode(data),
 					'iv':base64.b64encode(iv),
 					'salt':base64.b64encode(salt),
 					'session_id': str(self.session_id),
-					'hmac':base64.b64encode(self.add_hmac(message,key))
+					'hmac':base64.b64encode(self.add_hmac(data,key))
 				}
+
+
 			logger.info("get list")
 
 			req = requests.get(f'{SERVER_URL}/api',headers=headers)

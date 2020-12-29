@@ -82,6 +82,9 @@ class MediaServer(resource.Resource):
 		self.decrypt_catalog('./catalog/')
 		self.licenses = {}		# media_id : list(user)	
 
+
+
+
 	def encrypt_catalog(self,path):
 		kdf = PBKDF2HMAC(
 			algorithm=hashes.SHA256(),
@@ -133,6 +136,47 @@ class MediaServer(resource.Resource):
 						text += unpadder.finalize()
 						self.files[entry.name[:-4]] = text
 
+
+	def negotiate_alg(self,data):
+		logger.debug('CHECKING CIPHERS')
+		client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
+		availableciphers=[c for c in self.ciphers if c in client_ciphers]
+		availabledigests=[c for c in  self.digests if c in client_digests]
+		availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
+		if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
+			logger.error('NO AVAILABLE CIPHERS,DIGESTS OR CIPHERMODES')
+			data={'method': 'NACK','content':'The server does not have any of the client\'s ciphers '}
+			return json.dumps(data).encode('latin')
+	
+		# enviar mensagem a dizer q n pode
+		#server chooses the cipher to communicate acordding to client's available ciphers
+		session = Session()
+		session.cipher = availableciphers[0]
+		
+		session.digest = availabledigests[0]
+		session.mode=None
+		if session.cipher!='ChaCha20':
+			session.mode = availablemodes[0] 
+			if session.cipher == '3DES':
+				session.mode=[md for md in availablemodes if md != 'CTR'][0]
+			else:
+				session.mode=availablemodes[0]
+		self.sessions[session.id] = session
+		logger.debug('Success checking ciphers')
+		#enviar 
+		session.state='NEGOTIATE_ALGS'
+		message = {
+			'method': 'ACK',
+			'id':session.id,
+			'cipher':session.cipher,
+			'mode':session.mode,
+			'digest':session.digest,
+			'cert' : base64.b64encode(self.certificate.public_bytes(serialization.Encoding.PEM)).decode('latin')
+			}
+
+		message = json.dumps(message).encode('latin')
+		return message
+
 	def check_session_id(self,args):
 		if b'session_id' not in args:
 			logger.debug("id not in the request parameters")
@@ -161,13 +205,7 @@ class MediaServer(resource.Resource):
 			self.private_key = serialization.load_pem_private_key(f.read(),password=None)
 		
 
-	def clean_session(self,session):
-		if session.id in self.sessions:
-			del self.sessions[session.id]
-			return True
-		else:
-			return False
-		
+
 
 
 	def sign_message(self,msg):
@@ -218,43 +256,6 @@ class MediaServer(resource.Resource):
 	
 		return cert
 		
-
-	# Send the list of media files to clients
-	def do_list(self, request,session):
-
-		# Build list
-		message=None
-		if session.state!='VERIFY_CHALLENGE':
-			data = {'method':'NACK','content': 'Could not get the List of Media Content. Invalid State'}
-		else:
-			media_list = []
-			for media_id in CATALOG:
-				media = CATALOG[media_id]
-				media_list.append({
-					'id': media_id,
-					'name': media['name'],
-					'description': media['description'],
-					'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
-					'duration': media['duration']
-					})
-			#print(type(media_list[0]['id']))
-			# Return list to client
-			
-			logger.debug(request.args)
-			#params=j
-			session.state='SERVER_LIST'
-			message=json.dumps({'method':'ACK', 'media_list':media_list})
-
-		key,salt = self.derive_key(session.shared_key,session)
-		cryptogram,iv=self.encrypt_message(json.dumps(message).encode('latin'),session,key)
-		hmac=self.add_hmac(cryptogram,session,key)
-		#print(type(cryptogram.decode('latin')))
-		message = base64.b64encode(cryptogram).decode('latin')
-		iv = base64.b64encode(iv).decode('latin')
-		salt=base64.b64encode(salt).decode('latin')
-		hmac=base64.b64encode(hmac).decode('latin')
-		data= {'message':message,'iv':iv,'salt':salt ,'hmac': hmac}
-		return json.dumps(data, indent=4).encode('latin')
 
 
 
@@ -445,64 +446,6 @@ class MediaServer(resource.Resource):
 		return key,salt
 
 
-	def negotiate_alg(self,data):
-		logger.debug('CHECKING CIPHERS')
-		client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
-		availableciphers=[c for c in self.ciphers if c in client_ciphers]
-		availabledigests=[c for c in  self.digests if c in client_digests]
-		availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
-		if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
-			logger.error('NO AVAILABLE CIPHERS,DIGESTS OR CIPHERMODES')
-			data={'method': 'NACK','content':'The server does not have any of the client\'s ciphers '}
-			return json.dumps(data).encode('latin')
-	
-		# enviar mensagem a dizer q n pode
-		#server chooses the cipher to communicate acordding to client's available ciphers
-		session = Session()
-		session.cipher = availableciphers[0]
-		
-		session.digest = availabledigests[0]
-		session.mode=None
-		if session.cipher!='ChaCha20':
-			session.mode = availablemodes[0] 
-			if session.cipher == '3DES':
-				session.mode=[md for md in availablemodes if md != 'CTR'][0]
-			else:
-				session.mode=availablemodes[0]
-		self.sessions[session.id] = session
-		logger.debug('Success checking ciphers')
-		#enviar 
-		session.state='NEGOTIATE_ALGS'
-		message = {
-			'method': 'ACK',
-			'id':session.id,
-			'cipher':session.cipher,
-			'mode':session.mode,
-			'digest':session.digest,
-			'cert' : base64.b64encode(self.certificate.public_bytes(serialization.Encoding.PEM)).decode('latin')
-			}
-
-		message = json.dumps(message).encode('latin')
-		return message
-
-	def leave(self,request,session):
-		key, salt = self.derive_key(session.shared_key,session)
-		message=None
-		if self.clean_session(session):
-			logger.debug("Cleared Session")
-			message=json.dumps({ 'method':'ACK'}).encode('latin')
-		else:
-			logger.debug("Session id not Found")
-			message=json.dumps({ 'method':'NACK','content': 'Session id not Found'}).encode('latin')
-		key, salt = self.derive_key(session.shared_key,session)
-		message,iv = self.encrypt_message(message,session,key)
-		response = json.dumps({
-			'message':base64.b64encode(message).decode('latin'),
-			'iv':base64.b64encode(iv).decode('latin'),
-			'salt':base64.b64encode(salt).decode('latin'),
-			'hmac':base64.b64encode(self.add_hmac(message,session,key)).decode('latin')
-			}).encode('latin')
-		return response
 	
 	def dh_key_gen(self,request):
 		"""
@@ -636,7 +579,57 @@ class MediaServer(resource.Resource):
 			'hmac':base64.b64encode(self.add_hmac(message,session,key)).decode('latin')
 		}).encode('latin')	
 		return response			
-		
+		# Send the list of media files to clients
+	def do_list(self, request,session):
+
+		# Build list
+		message=None
+		if session.state!='VERIFY_CHALLENGE':
+			data = {'method':'NACK','content': 'Could not get the List of Media Content. Invalid State'}
+		else:
+			media_list = []
+			for media_id in CATALOG:
+				media = CATALOG[media_id]
+				media_list.append({
+					'id': media_id,
+					'name': media['name'],
+					'description': media['description'],
+					'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
+					'duration': media['duration']
+					})
+			#print(type(media_list[0]['id']))
+			# Return list to client
+			
+			logger.debug(request.args)
+			#params=j
+			session.state='SERVER_LIST'
+			message=json.dumps({'method':'ACK', 'media_list':media_list})
+
+		key,salt = self.derive_key(session.shared_key,session)
+		cryptogram,iv=self.encrypt_message(json.dumps(message).encode('latin'),session,key)
+		hmac=self.add_hmac(cryptogram,session,key)
+		#print(type(cryptogram.decode('latin')))
+		message = base64.b64encode(cryptogram).decode('latin')
+		iv = base64.b64encode(iv).decode('latin')
+		salt=base64.b64encode(salt).decode('latin')
+		hmac=base64.b64encode(hmac).decode('latin')
+		data= {'message':message,'iv':iv,'salt':salt ,'hmac': hmac}
+		return json.dumps(data, indent=4).encode('latin')
+
+	def send_license(self,session,media_id):
+		cert = self.gen_license(session,media_id)
+		key, salt = self.derive_key(session.shared_key,session)
+		content,iv = self.encrypt_message(json.dumps({
+			'method':'ACK',
+			'license':cert.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin'),session,key)
+		response=json.dumps({
+			'message':base64.b64encode(content).decode('latin'),
+			'iv':base64.b64encode(iv).decode('latin'),
+			'salt':base64.b64encode(salt).decode('latin'),
+			'hmac':base64.b64encode(self.add_hmac(content,session,key)).decode('latin'),
+		})
+		logger.debug("Sent license")
+		return response.encode('latin')
 		
 	def start_download(self,request,session,data):
 		message=None
@@ -668,20 +661,50 @@ class MediaServer(resource.Resource):
 		return response.encode('latin')
 		
 
-	def send_license(self,session,media_id):
-		cert = self.gen_license(session,media_id)
+
+
+	def clean_session(self,session):
+		if session.id in self.sessions:
+			del self.sessions[session.id]
+			return True
+		else:
+			return False
+		
+	def leave(self,request,session):
 		key, salt = self.derive_key(session.shared_key,session)
-		content,iv = self.encrypt_message(json.dumps({
-			'method':'ACK',
-			'license':cert.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin'),session,key)
-		response=json.dumps({
-			'message':base64.b64encode(content).decode('latin'),
+		message=None
+		if self.clean_session(session):
+			logger.debug("Cleared Session")
+			message=json.dumps({ 'method':'ACK'}).encode('latin')
+		else:
+			logger.debug("Session id not Found")
+			message=json.dumps({ 'method':'NACK','content': 'Session id not Found'}).encode('latin')
+		key, salt = self.derive_key(session.shared_key,session)
+		message,iv = self.encrypt_message(message,session,key)
+		response = json.dumps({
+			'message':base64.b64encode(message).decode('latin'),
 			'iv':base64.b64encode(iv).decode('latin'),
 			'salt':base64.b64encode(salt).decode('latin'),
-			'hmac':base64.b64encode(self.add_hmac(content,session,key)).decode('latin'),
-		})
-		logger.debug("Sent license")
-		return response.encode('latin')
+			'hmac':base64.b64encode(self.add_hmac(message,session,key)).decode('latin')
+			}).encode('latin')
+		return response
+
+	def hmac_wrong_message(self,session):
+		key,salt=self.derive_key(session.shared_key,session)
+		
+		message=json.dumps({
+				'method':'NACK',
+				'content':'HMAC Wrong!'
+			}).encode('latin')
+
+		message,iv = self.encrypt_message(message,session,key)
+		response = json.dumps({
+			'message':base64.b64encode(message).decode('latin'),
+			'iv':base64.b64encode(iv).decode('latin'),
+			'salt':base64.b64encode(salt).decode('latin'),
+			'hmac':base64.b64encode(self.add_hmac(message,session,key)).decode('latin')
+		}).encode('latin')	
+		return response
 
 
 	# Handle a GET request
@@ -704,25 +727,24 @@ class MediaServer(resource.Resource):
 				content = base64.b64decode(data[b'content'].decode())
 				hmac = base64.b64decode(data[b'hmac'].decode())
 				key,_=self.derive_key(session.shared_key,session,salt)			
+				if not self.verify_hmac(session,hmac,content,key):
+					logger.debug("HMAC WRONG")
+					return self.hmac_wrong_message(session)
+
+				
 				data = self.decrypt_message(content,iv,session,key).decode('latin')
 				data = json.loads(data.encode())
 				method = data.get('method')
 				
-
 				if method == 'GET_LIST':
-					if not self.verify_hmac(session,hmac,content,key):
-						logger.debug("HMAC WRONG")
-					else:
-						logger.debug("HMAC OK")
-						return self.do_list(request,session)
+					return self.do_list(request,session)
 				elif method == 'DOWNLOAD':
 					chunk_id = data.get('chunk_id')
 					media_id = data.get('media_id')
-					
-					if media_id is None:
-						request.setResponseCode(400)
-						request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-						return json.dumps({'error': 'invalid media id'}).encode('latin')
+					#if media_id is None:
+						#request.setResponseCode(400)
+						#request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+						#return json.dumps({'error': 'invalid media id'}).encode('latin')
 					return self.do_download(request,session,media_id,int(chunk_id))
 				elif method == 'GET_LICENSE':
 					media_id = data.get('media_id')
@@ -734,7 +756,8 @@ class MediaServer(resource.Resource):
 			request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
 			return b''
 	
-	
+
+
 	# Handle a POST request
 	def render_POST(self, request):
 		logger.debug(f'Received POST for {request.uri}')
@@ -762,7 +785,7 @@ class MediaServer(resource.Resource):
 				key,_=self.derive_key(session.shared_key,session,salt)
 
 				if not self.verify_hmac(session,hmac,data,key):
-					logger.debug("Ups HMAC Wrong")
+					return self.hmac_wrong_message(session)
 				else:
 
 					data = self.decrypt_message(data,iv,session,key).decode('latin')
@@ -788,6 +811,8 @@ class MediaServer(resource.Resource):
 			return b''
 
 		return b''
+
+
 
 
 print("Server started")
