@@ -892,22 +892,27 @@ def main():
 			}
 
 		req = requests.get(f'{SERVER_URL}/api',headers=headers)
+		response = json.loads(req.text)
 		
-		chunk = req.json()
-		data = binascii.a2b_base64(chunk['data'].encode('latin'))
-		iv, salt = base64.b64decode(chunk['iv']), base64.b64decode(chunk['salt'])
-		hmac = base64.b64decode(chunk['hmac'])
-		key, _ = client.derive_key(client.chunk_identification(chunk['chunk'], chunk['media_id']), salt)
 		
-		if client.verify_hmac(hmac, data, key):
+		
+		iv = base64.b64decode(response['iv'])
+		hmac = base64.b64decode(response['hmac'])
+		salt = base64.b64decode(response['salt'])
+		msg = base64.b64decode(response['message'])
+		key, _ = client.derive_key(client.chunk_identification(chunk,media_item['id']), salt)
+
+		if client.verify_hmac(hmac, msg, key):
 			logger.info("HMAC OK")
-			data = client.decrypt_message(data, iv, key)
-			#logger.info(data)
-			#data = binascii.a2b_base64(data)
-			try:
-				proc.stdin.write(data)
-			except:
-				break
+			data = json.loads(client.decrypt_message(msg, iv, key))
+			if data['method'] == 'ACK':
+				data = binascii.a2b_base64(data['chunk_data'])
+				try:
+					proc.stdin.write(data)
+				except:
+					break
+			else :
+				logger.info(data['content'])
 		else:
 			logger.info("HMAC Wrong. Communications compromised")
 			exit(0)

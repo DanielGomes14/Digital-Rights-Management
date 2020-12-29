@@ -261,11 +261,20 @@ class MediaServer(resource.Resource):
 
 	def do_download(self,request,session,media_id,chunk_id):
 		
+		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+		key,salt=self.derive_key(self.chunk_identification(session,chunk_id,media_id),session)
 		# Search media_id in the catalog
 		if media_id not in CATALOG:
 			request.setResponseCode(404)
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-			return json.dumps({'error': 'media file not found'}).encode('latin')
+			data=json.dumps({'method':'NACK','content':'media file not found'}).encode('latin')
+			data,iv=self.encrypt_message(data,session,key)
+			message = json.dumps({
+			'data': base64.b64encode(data).decode('latin'),
+			'iv': base64.b64encode(iv).decode('latin'),
+			'salt': base64.b64encode(salt).decode('latin'),
+			'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')})
+			return message.encode('latin')
 		
 		# Get the media item
 		media_item = CATALOG[media_id]
@@ -283,7 +292,14 @@ class MediaServer(resource.Resource):
 		if not valid_chunk:
 			request.setResponseCode(400)
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-			return json.dumps({'error': 'invalid chunk id'}).encode('latin')
+			data=json.dumps({'method':'NACK','content':'chunk id not found'}).encode('latin')
+			data,iv=self.encrypt_message(data,session,key)
+			message = json.dumps({
+			'data': base64.b64encode(data).decode('latin'),
+			'iv': base64.b64encode(iv).decode('latin'),
+			'salt': base64.b64encode(salt).decode('latin'),
+			'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')})
+			return message.encode('latin')
 			
 		logger.debug(f'Download: chunk: {chunk_id}')
 
@@ -291,17 +307,16 @@ class MediaServer(resource.Resource):
 
 		
 		# Open file, seek to correct position and return the chunk
-		data=self.files[media_id]
-		data=data[offset:offset+CHUNK_SIZE]
-		request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-		key,salt=self.derive_key(self.chunk_identification(session,chunk_id,media_id),session)
+		chunk_data=self.files[media_id]
+		chunk_data=chunk_data[offset:offset+CHUNK_SIZE]
+		data=json.dumps({'method':'ACK',
+					'chunk_data': binascii.b2a_base64(chunk_data).decode('latin').strip(),}).encode('latin')
+
 		data,iv=self.encrypt_message(data,session,key)
 		#binascii.b2a_base64(data).decode('latin').strip(),
 		return json.dumps(
-				{
-					'media_id': media_id, 
-					'chunk': chunk_id, 
-					'data': binascii.b2a_base64(data).decode('latin').strip(),
+				{	
+					'message': base64.b64encode(data).decode('latin'),
 					'iv': base64.b64encode(iv).decode('latin'),
 					'salt': base64.b64encode(salt).decode('latin'),
 					'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')
