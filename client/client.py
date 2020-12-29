@@ -57,11 +57,11 @@ class Client:
 		self.trusting_chain=[]								#server certificate chain
 		self.issuers_certs={}								#CA certificates
 		self.crls_list=[]
-		self.load_certs('../lixo/')
-		self.load_crl('../lixo/')
+		self.load_certs('../Certs/')
+		self.load_crl('../Certs/')
 		self.read_cc()
 		self.licenses = {} 									# media_id : certificate 
-
+		self.state='INITIAL'
 	
 	def validate_certificate(self, certificate):
 		"""Verifies if the certificate is up to date """
@@ -73,7 +73,7 @@ class Client:
 	def validate_server_purpose(self,certificate):
 		"""Validates the server certificate purpose  """
 
-		server_auth=x509.oid.ExtendedKeyUsageOID.SERVER_AUTH
+		server_auth = x509.oid.ExtendedKeyUsageOID.SERVER_AUTH
 		extended_key_usages = certificate.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
 		return any(extension for extension in extended_key_usages.value if extension.dotted_string == server_auth.dotted_string)
 	
@@ -96,7 +96,7 @@ class Client:
 			logger.info("Could not Validate the Signature of the Certificate")
 			return False
 	
-	def validate_server_signature(self,recv_key,signature):
+	def validate_server_signature(self,recv_key, signature):
 		"""
 		Validate if the server public key for Diffie Hellmann is valid, in order to avoid MiTM
 		"""
@@ -116,7 +116,7 @@ class Client:
 
 
 
-	def crl_validation(self,cert):
+	def crl_validation(self, cert):
 		"""Validate if certificate is in list of the revocated certificates"""
 		return all(crl.get_revoked_certificate_by_serial_number(cert.serial_number) == None for crl in self.crls_list)
 	
@@ -127,7 +127,7 @@ class Client:
 		chain = self.trusting_chain
 		if len(self.trusting_chain) <= 1:
 			return False 
-		for i in range(0, len(chain) -1):
+		for i in range(0, len(chain) - 1):
 			#verifies if the signatures are valid 
 			if not self.validate_signature(chain[i+1], chain[i]):
 				return False
@@ -138,7 +138,7 @@ class Client:
 			
 		return True 
 
-	def load_certs(self,path):
+	def load_certs(self, path):
 		"""Loads Certificates from disk"""
 		try:
 			with os.scandir(path) as it:
@@ -148,7 +148,7 @@ class Client:
 							data=cert.read()
 							cr = x509.load_pem_x509_certificate(data)
 							if self.validate_certificate(cr):
-								self.issuers_certs[cr.subject.rfc4514_string()]=cr
+								self.issuers_certs[cr.subject.rfc4514_string()] = cr
 							
 				logger.info("Certicates loaded!")
 		except:
@@ -163,7 +163,7 @@ class Client:
 					if entry.name.endswith('crl') and entry.is_file():
 						with open(path + entry.name,'rb') as f:
 							crl_data = f.read()
-							crl = x509.load_der_x509_crl(crl_data, default_backend())
+							crl = x509.load_der_x509_crl(crl_data)
 							crls_list.append(crl)
 						
 				logger.info("Certicates loaded!")
@@ -218,8 +218,9 @@ class Client:
 			logger.info('ERROR NEGOTIATING ALGORITHMS')
 		else:
 			logger.info('NEGOTIATED ALGORITHMS WITH SUCCESS')
-			self.session_id=response['id']
+			self.session_id = response['id']
 			self.cipher, self.digest, self.ciphermode = response['cipher'], response['digest'], response['mode']
+			
 			cert = base64.b64decode(response['cert'])
 			cert = x509.load_pem_x509_certificate(cert)
 			self.build_cert_chain(cert)
@@ -231,71 +232,82 @@ class Client:
 				logger.info("Certificate is not valid")
 				exit(1)		# TODO: ver
 
-			self.server_cert=cert
+			#self.server_cert=cert
 
 	def dh_start(self):
 		""" Diffie-Helman: get parameters and generate public and private key """
-		
-		# GET request for the parameters and server public key
-		headers=None
-		if self.session_id!=None:
-			headers = {
-				'session_id':str(self.session_id)
-			}
-		response = requests.get(f'{SERVER_URL}/api/key',headers=headers)
-		
-		logger.info('Received parameters and Public Key with sucess')
-		data = json.loads(response.text)
-		p = data['p']
-		g = data['g']
+		if self.state=='NEGOTIATE_ALG':
+			# GET request for the parameters and server public key
+			headers = None
+			if self.session_id != None:
+				headers = {
+					'session_id':str(self.session_id)
+				}
+			response = requests.get(f'{SERVER_URL}/api/key',headers=headers)
+			
+			logger.info('Received parameters and Public Key with sucess')
+			data = json.loads(response.text)
+			p = data['p']
+			g = data['g']
 
-		# generates public and private key using the parameters
-		pn = dh.DHParameterNumbers(p, g)
-		self.dh_parameters = pn.parameters()
-		self.private_key = self.dh_parameters.generate_private_key()
-		self.public_key = self.private_key.public_key()
-		
-		#stores server public key
-		received_key = data['pub_key'].encode('latin')
-		self.srvr_publickey = load_pem_public_key(received_key)
-		signature  = data['signature'].encode('latin')
-		if self.validate_server_signature(received_key,signature):
-			self.state = 'DH_START'
-			logger.info("Signatures OK")
+			# generates public and private key using the parameters
+			pn = dh.DHParameterNumbers(p, g)
+			self.dh_parameters = pn.parameters()
+			self.private_key = self.dh_parameters.generate_private_key()
+			self.public_key = self.private_key.public_key()
+			
+			#stores server public key
+			received_key = data['pub_key'].encode('latin')
+			self.srvr_publickey = load_pem_public_key(received_key)
+			signature = data['signature'].encode('latin')
+			
+			if self.validate_server_signature(received_key,signature):
+				self.state = 'DH_START'
+				logger.info("Signatures OK")
+			else:
+				logger.info("Signatures wrong")
 		else:
-			logger.info("Signatures wrong")
+			return False
 
 		
 
 	def dh_exchange_key(self):
 		""" Exchange keys with the server"""
 		
-		logger.info('Sending POST Request to exchange DH Shared key')
-		key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+		if self.state =='DH_START':
 
-		data = {
-			'method': 'KEY_EXCHANGE',
-			'pub_key': key
-		}
-		# POST request sending public key
-		request = requests.post(f'{SERVER_URL}/api/key', json=data, headers={'Content-Type': 'application/json','session_id' : str(self.session_id)})
-		data = json.loads(request.text)
-		method = data['method']
-		if method == 'ACK':
-			logger.info('Server confirmed the exchange')
-			self.shared_key = self.private_key.exchange(self.srvr_publickey)
+
+			logger.info('Sending POST Request to exchange DH Shared key')
+			key = self.public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+			data = {
+				'method': 'KEY_EXCHANGE',
+				'pub_key': key
+			}
+
+			# POST request sending public key
+			request = requests.post(f'{SERVER_URL}/api/key', json=data, headers={'Content-Type': 'application/json','session_id' : str(self.session_id)})
+			data = json.loads(request.text)
+			method = data['method']
+			
+			if method == 'ACK':
+				logger.info('Server confirmed the exchange')
+				self.shared_key = self.private_key.exchange(self.srvr_publickey)
+				self.state='KEY_EXCHANGE'
+			else:
+				logger.info('Could not exchange a key with the server')
 		else:
-			logger.info('Could not exchange a key with the server')
-
+			return False
 
 	def encrypt_message(self, text,key):
 		"""Encrypts message with a symmetric key"""
 		iv = os.urandom(16)
-		cipher=None
-		algorithm,iv=None,None
-		mode=None
+		cipher = None
+		algorithm,iv = None,None
+		mode = None
 		
-		enc_shared_key=key[len(key)//2:]
+		enc_shared_key = key[len(key)//2:]
+
 		if self.cipher == 'AES':
 			algorithm = algorithms.AES(enc_shared_key)
 		elif self.cipher == '3DES':
@@ -304,21 +316,21 @@ class Client:
 			iv = os.urandom(16)
 			algorithm = algorithms.ChaCha20(enc_shared_key, iv)
 			logger.debug('Algorithm not suported')
+		
 		if self.cipher != 'ChaCha20':
 			# with ChaCha20 we do not pad the data
 			iv = os.urandom(algorithm.block_size//8)
 			if self.ciphermode == 'CBC':
 				mode = modes.CBC(iv)
-			elif self.ciphermode == 'GCM':
-				mode = modes.GCM(iv)
 			elif self.ciphermode == 'CTR':
 				mode = modes.CTR(iv)
 			padder = padding.PKCS7(algorithm.block_size).padder()
 			padded_data = padder.update(text)
 			padded_data += padder.finalize()
+			text=padded_data
 		cipher = Cipher(algorithm, mode=mode)
 		encryptor = cipher.encryptor()
-		cryptogram = encryptor.update(padded_data) + encryptor.finalize()
+		cryptogram = encryptor.update(text) + encryptor.finalize()
 
 		return cryptogram, iv
 
@@ -343,10 +355,9 @@ class Client:
 		# with ChaCha20 we do not pad the data
 		if self.ciphermode == 'CBC':
 			mode = modes.CBC(iv)
-		elif self.ciphermode == 'GCM':
-			mode = modes.GCM(iv)
 		elif self.ciphermode == 'CTR':
 			mode = modes.CTR(iv)
+		
 		cipher = Cipher(algorithm, mode=mode)
 		decryptor = cipher.decryptor()
 		if self.cipher == 'ChaCha20':
@@ -359,7 +370,17 @@ class Client:
 			return text
 
 	
-	
+	def receive_message(self,response):
+
+		iv = base64.b64decode(response['iv'])
+		hmac = base64.b64decode(response['hmac'])
+		salt = base64.b64decode(response['salt'])
+		msg = base64.b64decode(response['message'])
+		
+		key, _ = self.derive_key(self.shared_key,salt)
+
+		return msg,key,iv,salt,hmac
+
 
 	def read_cc(self):
 		"""Reads citizen card certificates and private key"""
@@ -370,13 +391,16 @@ class Client:
 		self.slots =pkcs11.getSlotList()
 		for slot in self.slots:
 			print(pkcs11.getTokenInfo(slot))
+		
 		#slot=pkcs11.getSlotList(tokenPresent=Tru)[0]
 		self.session=pkcs11.openSession(slot)
 		all_attributes = list(PyKCS11.CKA.keys())
 		all_attributes = [e for e in all_attributes if isinstance(e, int)]
+		
 		obj = self.session.findObjects([(PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION CERTIFICATE')])[0]
 		attributes = self.session.getAttributeValue(obj, all_attributes)
 		attributes = dict(zip(map(PyKCS11.CKA.get, all_attributes), attributes))
+		
 		self.certificate=x509.load_der_x509_certificate(bytes(attributes['CKA_VALUE']))
 		cc_num = self.certificate.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
 		self.private_key_cc = self.session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY), (PyKCS11.CKA_LABEL, 'CITIZEN AUTHENTICATION KEY')])[0]
@@ -387,73 +411,73 @@ class Client:
 		"""Signs message with private key"""
 		mech = PyKCS11.Mechanism(PyKCS11.CKM_SHA1_RSA_PKCS, None)
 		signature = bytes(self.session.sign(self.private_key_cc, text, mech))
-		self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
+		#self.certificate.public_key().verify(signature,text, pd.PKCS1v15(), hashes.SHA1())
 		return signature
 
 	def chunk_identification(self, chunk_id, media_id):
-		"""Generates a digest that identifies the given chunk and media"""
-		chunk_id = str(chunk_id)
-		final_id =(self.shared_key.decode('latin')+media_id+chunk_id).encode('latin')
-		algorithm=None
-		if self.digest =='SHA-256':
-			algorithm=hashes.SHA256()
-		elif self.digest == 'SHA-512':
-			algorithm = hashes.SHA512()
-		digest=hashes.Hash(algorithm)
-		digest.update(final_id)
-		return digest.finalize()
+		"""Generates a key that identifies the given chunk and media"""
+		return (self.shared_key.decode('latin') + media_id + str(chunk_id)).encode('latin')
+
 
 	def start_challenge(self):
 		"""
 		Client sends to server his certificate in order to validate it,
 		along side with a challenge. 
 		"""
-		logger.info("Starting Challenge")
-		nonce = os.urandom(16)
-		self.challenge_nonce = nonce
-		key, salt = self.derive_key(self.shared_key)
-		if self.session_id!=None:
-			headers = {
-				'Content-Type': 'application/json',
-				'session_id' : str(self.session_id)
-				}	
-		message = json.dumps({
-			'method': 'START_CHALLENGE',
-			'nonce':nonce.decode('latin'), 
-			'cert':self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin')
-		}).encode('latin')		
-		data,iv = self.encrypt_message(message,key)
-		
-		logger.info("Sucessfuly encrypted challenge and certificate")
-		
-		message = {
-			'data':base64.b64encode(data),
-			'iv':base64.b64encode(iv),
-			'hmac':base64.b64encode(self.add_hmac(data,key)),
-			'salt':base64.b64encode(salt)
-		}
-		
-		logger.info("Sending POST Challenge and CLient Certificate")
-		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
-		
-		response = json.loads(request.text)
-		iv =base64.b64decode(response['iv'])
-		hmac=base64.b64decode(response['hmac'])
-		salt = base64.b64decode(response['salt'])
-		msg = base64.b64decode(response['message'])
-		
-		key, _ = self.derive_key(self.shared_key,salt)
-		if not self.verify_hmac(hmac,msg,key):
-			logger.info("HMAC IS WRONG...")
+		if self.state=='KEY_EXCHANGE':
+
+			logger.info("Starting Challenge")
+			nonce = os.urandom(16)
+			self.challenge_nonce = nonce
+			key, salt = self.derive_key(self.shared_key)
+			if self.session_id != None:
+				headers = {
+					'Content-Type': 'application/json',
+					'session_id' : str(self.session_id)
+					}	
+			message = json.dumps({
+				'method': 'START_CHALLENGE',
+				'nonce': nonce.decode('latin'), 
+				'cert': self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin')
+			}).encode('latin')		
+			data,iv = self.encrypt_message(message,key)
+			
+			logger.info("Sucessfuly encrypted challenge and certificate")
+			
+			message = {
+				'data': base64.b64encode(data),
+				'iv': base64.b64encode(iv),
+				'hmac': base64.b64encode(self.add_hmac(data,key)),
+				'salt': base64.b64encode(salt)
+			}
+			
+			logger.info("Sending POST Challenge and Client Certificate")
+			request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
+			
+			response = json.loads(request.text)
+			message, key, iv, salt, hmac = self.receive_message(response)
+			#iv = base64.b64decode(response['iv'])
+			#hmac = base64.b64decode(response['hmac'])
+			#salt = base64.b64decode(response['salt'])
+			#msg = base64.b64decode(response['message'])
+			
+			#key, _ = self.derive_key(self.shared_key,salt)
+			if not self.verify_hmac(hmac,message,key):
+				exit(0)
+			else:
+				logger.info("HMAC OK")
+				message = self.decrypt_message(message,iv,key)
+				message = json.loads(message)
+				nonce = message['snonce'].encode('latin')
+				nonce2 = message['nonce2'].encode('latin')
+				self.state='START_CHALLENGE'
+				if self.verify_challenge(nonce):
+					self.accept_challenge(nonce2)
+				else:
+					return False
+
 		else:
-			logger.info("HMAC OK")
-			message = self.decrypt_message(msg,iv,key)
-			message=json.loads(message)
-			nonce=message['snonce'].encode('latin')
-			nonce2=message['nonce2'].encode('latin')
-			if self.verify_challenge(nonce):
-				self.accept_challenge(nonce2)
-		
+			return False	
 
 
 
@@ -477,49 +501,52 @@ class Client:
 	def accept_challenge(self,nonce2):
 		"""Accepts Server challenge and sends signed Nonce"""
 		logger.info("Sending POST to accept Challenge")
-
-		snonce2=self.sign_message(nonce2)
-		self.challenge_nonce2 = snonce2
-		key, salt = self.derive_key(self.shared_key)
-		if self.session_id!=None:
-			headers = {
-				'Content-Type': 'application/json',
-				'session_id': str(self.session_id)
+		if self.state=='START_CHALLENGE':
+			snonce2 = self.sign_message(nonce2)
+			self.challenge_nonce2 = snonce2
+			key, salt = self.derive_key(self.shared_key)
+			if self.session_id != None:
+				headers = {
+					'Content-Type': 'application/json',
+					'session_id': str(self.session_id)
+				}
+			
+			message = json.dumps({'method': 'ACCEPT_CHALLENGE','snonce2':snonce2.decode('latin')}).encode('latin')
+			data, iv = self.encrypt_message(message,key)
+			
+			logger.info("Sucessfuly encrypted challenge and certificate")
+			message = {
+				'data': base64.b64encode(data),
+				'iv': base64.b64encode(iv),
+				'salt': base64.b64encode(salt),
+				'hmac': base64.b64encode(self.add_hmac(data,key))		
 			}
-		
-		message = json.dumps({'method': 'ACCEPT_CHALLENGE','snonce2':snonce2.decode('latin')}).encode('latin')
-		data,iv = self.encrypt_message(message,key)
-		
-		logger.info("Sucessfuly encrypted challenge and certificate")
-		message = {
-			'data':base64.b64encode(data),
-			'iv':base64.b64encode(iv),
-			'salt':base64.b64encode(salt),
-			'hmac':base64.b64encode(self.add_hmac(data,key))		
-		}
 
 
-		logger.info("Sending POST Challenge")
-		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
-		logger.info("teste")
-		response = json.loads(request.text)
-		iv =base64.b64decode(response['iv'])
-		hmac=base64.b64decode(response['hmac'])
-		salt = base64.b64decode(response['salt'])
-		msg = base64.b64decode(response['message'])
-		
-		key, _ = self.derive_key(self.shared_key,salt)
-		if not self.verify_hmac(hmac,msg,key):
-			logger.info("HMAC IS WRONG...")
-		else:
-			logger.info("HMAC OK")
-			message = self.decrypt_message(msg,iv,key)
-			message=json.loads(message)
-			if message['method'] == 'ACK':
-				logger.info("ACK")
+			logger.info("Sending POST Challenge")
+			request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
+			response = json.loads(request.text)
+
+			message, key, iv, salt, hmac = self.receive_message(response)
+			#iv = base64.b64decode(response['iv'])
+			#hmac = base64.b64decode(response['hmac'])
+			#salt = base64.b64decode(response['salt'])
+			#msg = base64.b64decode(response['message'])
+			
+			#key, _ = self.derive_key(self.shared_key,salt)
+			if not self.verify_hmac(hmac,message,key):
+				exit(0)
 			else:
-				logger.info("NACK")
-				exit(1)
+				logger.info("HMAC OK")
+				message = self.decrypt_message(message,iv,key)
+				message=json.loads(message)
+				if message['method'] == 'ACK':
+					self.state='ACCEPT_CHALLENGE'					
+				else:
+					logger.info(message['content'])
+					return False
+		else:
+			return False
 		
 
 	def derive_key(self, data, salt=None):
@@ -581,40 +608,85 @@ class Client:
 			return False
 
 	def get_list(self):
-		
-		payload=None
-		if self.session_id!=None:
-			key, salt = self.derive_key(self.shared_key)
-			message, iv = self.encrypt_message(json.dumps({'method': 'GET_LIST'}).encode('latin'),key)
-			headers = {
-				'content':base64.b64encode(message),
-				'iv':base64.b64encode(iv),
-				'salt':base64.b64encode(salt),
-				'session_id': str(self.session_id),
-				'hmac':base64.b64encode(self.add_hmac(message,key))
-			}
-		logger.info("get list")
+		if self.state=='ACCEPT_CHALLENGE':
+			payload=None
+			if self.session_id!=None:
+				key, salt = self.derive_key(self.shared_key)
+				message, iv = self.encrypt_message(json.dumps({'method': 'GET_LIST'}).encode('latin'),key)
+				headers = {
+					'content':base64.b64encode(message),
+					'iv':base64.b64encode(iv),
+					'salt':base64.b64encode(salt),
+					'session_id': str(self.session_id),
+					'hmac':base64.b64encode(self.add_hmac(message,key))
+				}
+			logger.info("get list")
 
-		req = requests.get(f'{SERVER_URL}/api',headers=headers)
+			req = requests.get(f'{SERVER_URL}/api',headers=headers)
 
-		if req.status_code == 200:
-			print("Got Server List")
-		data = json.loads(req.text)
-		cryptogram = base64.b64decode(data['cryptogram'])
-		iv = base64.b64decode(data['iv'])
-		salt = base64.b64decode(data['salt'])
-		key,_ = self.derive_key(self.shared_key,salt)
-		hmac = base64.b64decode(data['hmac'])
+			if req.status_code == 200:
+				print("Got Server List")
 
-		logger.info("verifying hmac..")
-		verif = self.verify_hmac(hmac, cryptogram,key)
-		if verif:
-			logger.info("HMAC OK")
-			media_list = json.loads(self.decrypt_message(cryptogram, iv,key))
-			return media_list
+			response = json.loads(req.text)
+			message, key, iv, salt, hmac = self.receive_message(response)
+			#message = base64.b64decode(data['message'])
+			#iv = base64.b64decode(data['iv'])
+			#salt = base64.b64decode(data['salt'])
+			#key,_ = self.derive_key(self.shared_key,salt)
+			#hmac = base64.b64decode(data['hmac'])
+
+			logger.info("verifying hmac..")
+			if self.verify_hmac(hmac, message,key):
+				logger.info("HMAC OK")
+				content=json.loads((self.decrypt_message(message, iv,key)))
+				content=json.loads(content)
+				if content['method']== 'ACK':
+					media_list =content['media_list']
+					self.state='SERVER_LIST'
+					return media_list
+				else:
+					logger.info(content['content'])
+					return False
+
+			else:
+				exit(0)
 		else:
-			logger.info("HMAC Wrong. Communications Compromised")
-			return None
+			return False
+
+	def leave(self):
+		key, salt = self.derive_key(self.shared_key)
+		headers = {
+		'Content-Type': 'application/json',
+		'session_id': str(self.session_id)
+		}
+
+		message = json.dumps({'method': 'GOODBYE'}).encode('latin')
+		data, iv = self.encrypt_message(message,key)
+		message = {
+			'data': base64.b64encode(data),
+			'iv': base64.b64encode(iv),
+			'salt': base64.b64encode(salt),
+			'hmac': base64.b64encode(self.add_hmac(data,key))		
+		}
+
+
+		logger.info("Sending POST to Leave")
+		request = requests.post(f'{SERVER_URL}/api',json=message, headers=headers)
+		response = json.loads(request.text)
+		message, key, iv, salt, hmac = self.receive_message(response)
+		if self.verify_hmac(hmac, message,key):
+			content=json.loads((self.decrypt_message(message, iv,key)))
+			if content['method']== 'ACK':
+					logger.info("goodbye")
+					return 
+			else:
+				logger.info(content['content'])
+			return		
+		else:
+			return
+
+
+
 
 	def list_media_content(self,media_list):
 		idx = 0
@@ -626,6 +698,7 @@ class Client:
 		while True:
 			selection = input("Select a media file number (q to quit): ")
 			if selection.strip() == 'q':
+				self.leave()
 				sys.exit(0)
 
 			if not selection.isdigit():
@@ -640,90 +713,97 @@ class Client:
 		return media_item
 
 	def get_new_license(self,media_id):
-		payload=None
-		if self.session_id!=None:
-			key, salt = self.derive_key(self.shared_key)
-			message, iv = self.encrypt_message(json.dumps({'method': 'GET_LICENSE','media_id':media_id}).encode('latin'),key)
-			headers = {
-				'content':base64.b64encode(message),
-				'iv':base64.b64encode(iv),
-				'salt':base64.b64encode(salt),
-				'session_id': str(self.session_id),
-				'hmac':base64.b64encode(self.add_hmac(message,key))
-			}
-			req = requests.get(f'{SERVER_URL}/api',headers=headers)
+		if self.state=='SERVER_LIST':
 
+			payload=None
+			if self.session_id!=None:
+				key, salt = self.derive_key(self.shared_key)
+				message, iv = self.encrypt_message(json.dumps({'method': 'GET_LICENSE','media_id':media_id}).encode('latin'),key)
+				headers = {
+					'content':base64.b64encode(message),
+					'iv':base64.b64encode(iv),
+					'salt':base64.b64encode(salt),
+					'session_id': str(self.session_id),
+					'hmac':base64.b64encode(self.add_hmac(message,key))
+				}
+				req = requests.get(f'{SERVER_URL}/api',headers=headers)
 
-			
-			logger.info("Got new License")
-			##response
-			response = json.loads(req.text)
-			salt = base64.b64decode(response['salt'])
-			key,_=self.derive_key(self.shared_key,salt)
-			
-			iv =base64.b64decode(response['iv'])
-			hmac=base64.b64decode(response['hmac'])
-			msg = base64.b64decode(response['message'])
-			message = json.loads(self.decrypt_message(msg,iv,key))
-			license = message['license']
-			self.licenses['media_id'] = x509.load_pem_x509_certificate(license.encode('latin'))
-			if not self.verify_hmac(hmac,msg,key):
-				logger.info("HMAC IS WRONG...")
-			else:
-				return self.start_download(media_id)
+				logger.info("Got new License")
+				##response
+				response = json.loads(req.text)
+				message, key, iv, salt, hmac = self.receive_message(response)
+				#salt = base64.b64decode(response['salt'])
+				#key,_=self.derive_key(self.shared_key,salt)
+				
+				#iv =base64.b64decode(response['iv'])
+				#hmac=base64.b64decode(response['hmac'])
+				#msg = base64.b64decode(response['message'])
+				if not self.verify_hmac(hmac,message,key):
+					exit(0)
+				else:
+					message = json.loads(self.decrypt_message(message,iv,key))
+					license = message['license']
+					self.licenses['media_id'] = x509.load_pem_x509_certificate(license.encode('latin'))
+					return self.start_download(media_id)
+		else:
+			return False
 
 
 
 	def start_download(self,media_id):
-
-		license = self.licenses.get('media_id')
-		if license == None:
-			return self.get_new_license(media_id)
+		if self.state == 'SERVER_LIST':
+			license = self.licenses.get('media_id')
+			if license == None:
+				return self.get_new_license(media_id)
+				
+			license=license.public_bytes(serialization.Encoding.PEM).decode('latin')
 			
-		license=license.public_bytes(serialization.Encoding.PEM).decode('latin')
-		
-		key, salt = self.derive_key(self.shared_key)
-		headers = {
-			'Content-Type': 'application/json',				
-			'session_id': str(self.session_id)
-		}
-		
-		data,iv = self.encrypt_message(json.dumps({
-			'method': 'START_DOWNLOAD',
-			'license':license,
-			'media_id':media_id
-		}).encode('latin'),key)
-		
-		message = {
-			'data':base64.b64encode(data),
-			'iv':base64.b64encode(iv),
-			'salt':base64.b64encode(salt),
-			'hmac':base64.b64encode(self.add_hmac(data,key))
-		}
+			key, salt = self.derive_key(self.shared_key)
+			
+			headers = {
+				'Content-Type': 'application/json',				
+				'session_id': str(self.session_id)
+			}
+			
+			data,iv = self.encrypt_message(json.dumps({
+				'method': 'START_DOWNLOAD',
+				'license':license,
+				'media_id':media_id
+			}).encode('latin'),key)
+			
+			message = {
+				'data':base64.b64encode(data),
+				'iv':base64.b64encode(iv),
+				'salt':base64.b64encode(salt),
+				'hmac':base64.b64encode(self.add_hmac(data,key))
+			}
 
-		logger.info("sending post to start download")
-		req = requests.post(f'{SERVER_URL}/api',json=message,headers=headers)
+			logger.info("sending post to start download")
+			req = requests.post(f'{SERVER_URL}/api',json=message,headers=headers)
 
-		
-		response = json.loads(req.text)
-		iv =base64.b64decode(response['iv'])
-		hmac=base64.b64decode(response['hmac'])
-		salt = base64.b64decode(response['salt'])
-		msg = base64.b64decode(response['message'])
-		
-		key, _ = self.derive_key(self.shared_key,salt)
-		if not self.verify_hmac(hmac,msg,key):
-			logger.info("HMAC IS WRONG...")
-		else:
-			message = json.loads(self.decrypt_message(msg,iv,key))
-			method = message['method']
-			if method == 'ACK':
-				logger.info("Server validated the license")
-				self.state = 'DOWNLOADING'
-				return True
+			response = json.loads(req.text)
+
+			message, key, iv, salt, hmac = self.receive_message(response)
+			#iv =base64.b64decode(response['iv'])
+			#hmac=base64.b64decode(response['hmac'])
+			#salt = base64.b64decode(response['salt'])
+			#msg = base64.b64decode(response['message'])
+			
+			#key, _ = self.derive_key(self.shared_key,salt)
+			if not self.verify_hmac(hmac,message,key):
+				exit(0)
 			else:
-				logger.info("Server did not validade the license")			
-				return False
+				message = json.loads(self.decrypt_message(message,iv,key))
+				method = message['method']
+				if method == 'ACK':
+					logger.info("Server validated the license")
+					self.state = 'START_DOWNLOAD'
+					return True
+				else:
+					logger.info(message['content'])		
+					return False
+		else:
+			return False
 
 
 def main():
@@ -737,11 +817,6 @@ def main():
 	# TODO: Secure the session
 	client = Client()
 
-	# get server public key
-
-	#req = requests.get(f'{SERVER_URL}/api/key')
-	# if req:
-	# print(req.content)
 	if not client.has_negotiated():
 		client.negotiate_algs()
 		client.dh_start()
@@ -766,6 +841,14 @@ def main():
 		#print(media_item)
 	# Present a simple selection menu
 
+	
+	headers={
+		'session_id': str(client.session_id)
+	}
+
+	if not client.start_download(media_item['id']):
+		return 
+	
 	print(f"Playing {media_item['name']}")
 
 	# Detect if we are running on Windows or Linux
@@ -777,14 +860,7 @@ def main():
 	else:
 		proc = subprocess.Popen(['ffplay', '-i', '-'], stdin=subprocess.PIPE)
 
-	# Get data from server and send it to the ffplay stdin through a pipe
-	headers={
-		'session_id': str(client.session_id)
-	}
 
-	if not client.start_download(media_item['id']):
-		return 
-	
 	for chunk in range(media_item['chunks'] + 1):
 		payload=None
 		if client.session_id!=None:
@@ -805,11 +881,10 @@ def main():
 		iv, salt = base64.b64decode(chunk['iv']), base64.b64decode(chunk['salt'])
 		hmac = base64.b64decode(chunk['hmac'])
 		key, _ = client.derive_key(client.chunk_identification(chunk['chunk'], chunk['media_id']), salt)
-		verif = client.verify_hmac(hmac, data, key)
-		if verif:
+		
+		if client.verify_hmac(hmac, data, key):
 			logger.info("HMAC OK")
 			data = client.decrypt_message(data, iv, key)
-			# TODO: Process chunk
 			#logger.info(data)
 			#data = binascii.a2b_base64(data)
 			try:
