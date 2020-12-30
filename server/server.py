@@ -38,7 +38,7 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
 				'description': 'Nicolai Heidlas Music: http://soundcloud.com/nicolai-heidlas',
 				'duration': 3*60+32,
 				'file_name': '898a08080d1840793122b7e118b27a95d117ebce.mp3',
-				'file_size': 7072823
+				'file_size': 3407202
 			}
 		}
 
@@ -137,34 +137,49 @@ class MediaServer(resource.Resource):
 						self.files[entry.name[:-4]] = text
 
 
+	def choose_alg(self,ciphers,digests,modes):
+		
+		availableciphers=[c for c in self.ciphers if c in ciphers]
+		availabledigests=[c for c in  self.digests if c in digests]
+		availablemodes=[c for c in self.ciphermodes if c in modes]
+		if len(availableciphers)==0 or len(availabledigests) == 0  or (len(availablemodes) == 0 and 'ChaCha20' not in availableciphers):
+			return None,None,None
+		cipher = availableciphers[0]
+		digest=availabledigests[0]
+		mode=None
+		
+		if cipher!='ChaCha20':
+			mode = availablemodes[0] 
+			if cipher == '3DES':
+				mode=[md for md in availablemodes if md != 'CTR'][0]
+			else:
+				mode=availablemodes[0]
+
+		return cipher,digest,mode
+
 	def negotiate_alg(self,data):
 		logger.debug('CHECKING CIPHERS')
 		client_ciphers,client_digests,client_ciphermodes=data['ciphers'],data['digests'],data['ciphermodes']
-		availableciphers=[c for c in self.ciphers if c in client_ciphers]
-		availabledigests=[c for c in  self.digests if c in client_digests]
-		availablemodes=[c for c in self.ciphermodes if c in client_ciphermodes]
-		if len(availableciphers)==0 or len(availabledigests) == 0  or len(availablemodes) == 0:
+		cipher, digest, mode = self.choose_alg(client_ciphers,client_digests,client_ciphermodes)
+
+		if cipher == None or digest == None or mode == None:
 			logger.error('NO AVAILABLE CIPHERS,DIGESTS OR CIPHERMODES')
-			data={'method': 'NACK','content':'The server does not have any of the client\'s ciphers '}
+			data={'method': 'NACK','content':'The server does not have any of the client\'s cihpers,digests  or ciphermodes'}
 			return json.dumps(data).encode('latin')
 	
 		# enviar mensagem a dizer q n pode
 		#server chooses the cipher to communicate acordding to client's available ciphers
 		session = Session()
-		session.cipher = availableciphers[0]
-		
-		session.digest = availabledigests[0]
-		session.mode=None
-		if session.cipher!='ChaCha20':
-			session.mode = availablemodes[0] 
-			if session.cipher == '3DES':
-				session.mode=[md for md in availablemodes if md != 'CTR'][0]
-			else:
-				session.mode=availablemodes[0]
+
+		session.cipher = cipher
+		session.digest = digest
+		session.mode = mode
+
+
 		self.sessions[session.id] = session
 		logger.debug('Success checking ciphers')
 		#enviar 
-		session.state='NEGOTIATE_ALGS'
+		session.state='NEGOTIATE_ALGS' #this variable corresponds to the last state this session has been .
 		message = {
 			'method': 'ACK',
 			'id':session.id,
@@ -190,8 +205,13 @@ class MediaServer(resource.Resource):
 		return session
 
 	def load_cert(self,_file):
-		with open(_file, 'rb') as f:
-			cert = x509.load_pem_x509_certificate(f.read())
+		try:
+
+			with open(_file, 'rb') as f:
+				cert = x509.load_pem_x509_certificate(f.read())
+		except:
+			logger.debug("Could not read server certificate.Make sure to run this file on the /server directory")
+			exit(0)
 		return cert
 	
 	def validate_certificate(self,certificate):
@@ -201,13 +221,13 @@ class MediaServer(resource.Resource):
 
 
 	def load_priv_key(self,_file):
-		with open(_file,'rb') as f:
-			self.private_key = serialization.load_pem_private_key(f.read(),password=None)
+		try:
+			with open(_file,'rb') as f:
+				self.private_key = serialization.load_pem_private_key(f.read(),password=None)
+		except:
+			logger.debug("Could not Load Private key. Make sure to run this file on the /server directory")
+			exit(0)
 		
-
-
-
-
 	def sign_message(self,msg):
 		signature = self.private_key.sign(
 			msg,
@@ -216,18 +236,36 @@ class MediaServer(resource.Resource):
 		)
 		signature = bytes(signature)
 		return signature
+		
 
+	def verify_license_signature(self,license):
+		try:
+			self.certificate.public_key().verify(
+				license.signature,
+				license.tbs_certificate_bytes,
+				pd.PKCS1v15(),
+				license.signature_hash_algorithm,
+			)
+			logger.debug("License Signature OK")
+			return True
+		except:
+			logger.debug("License Signature Wrong")
+			return False
 	
 	def validate_license(self,license,media_id):
-		""" Checks if license is up to date and if it is equal to the server """
+		""" Checks if license is up to date and if it is equal to the server,
+			and if the signature is valid
+		"""
 		now = datetime.now().timestamp()
 		dates = (license.not_valid_before.timestamp(),license.not_valid_after.timestamp())
 		return ( dates[0] < now < dates[1] and license in self.licenses[(media_id).decode('latin')]  and 
-		any(license.subject.rfc4514_string() == lc.subject.rfc4514_string() for lc in self.licenses[(media_id).decode('latin')]))
+		any(license.subject.rfc4514_string() == lc.subject.rfc4514_string() for lc in self.licenses[(media_id).decode('latin')])
+		and  self.verify_license_signature(license)
+		)
 
 
 	def gen_license(self,session,media_id):
-		# Provide various details about who we are.
+		
 		subject = x509.Name([
 		x509.NameAttribute(NameOID.COUNTRY_NAME, u"PT"),
 		x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Aveiro"),
@@ -269,12 +307,12 @@ class MediaServer(resource.Resource):
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 			data=json.dumps({'method':'NACK','content':'media file not found'}).encode('latin')
 			data,iv=self.encrypt_message(data,session,key)
-			message = json.dumps({
-			'data': base64.b64encode(data).decode('latin'),
+			response = json.dumps({
+			'message': base64.b64encode(data).decode('latin'),
 			'iv': base64.b64encode(iv).decode('latin'),
 			'salt': base64.b64encode(salt).decode('latin'),
 			'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')})
-			return message.encode('latin')
+			return response.encode('latin')
 		
 		# Get the media item
 		media_item = CATALOG[media_id]
@@ -294,12 +332,12 @@ class MediaServer(resource.Resource):
 			request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 			data=json.dumps({'method':'NACK','content':'chunk id not found'}).encode('latin')
 			data,iv=self.encrypt_message(data,session,key)
-			message = json.dumps({
-			'data': base64.b64encode(data).decode('latin'),
+			response = json.dumps({
+			'message': base64.b64encode(data).decode('latin'),
 			'iv': base64.b64encode(iv).decode('latin'),
 			'salt': base64.b64encode(salt).decode('latin'),
 			'hmac': base64.b64encode(self.add_hmac(data,session,key)).decode('latin')})
-			return message.encode('latin')
+			return response.encode('latin')
 			
 		logger.debug(f'Download: chunk: {chunk_id}')
 
@@ -561,7 +599,7 @@ class MediaServer(resource.Resource):
 		message=None
 		key, salt = self.derive_key(session.shared_key,session)
 		message=None
-		if session.state !='ACCEPT_CHALLENGE':
+		if session.state != 'ACCEPT_CHALLENGE':
 			message=json.dumps({
 					'method':'NACK',
 					'content':'Could not Verify Challenge. Invalid State.'
@@ -571,12 +609,19 @@ class MediaServer(resource.Resource):
 			try:
 				session.cert.public_key().verify(nonce2,session.nonce2, pd.PKCS1v15(), hashes.SHA1()) 
 				logger.debug("Challenge OK")
-				message=json.dumps({
-					'method':'ACK'
-				}).encode('latin')
-				session.state='VERIFY_CHALLENGE'
-				cc_num=session.cert.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
-				session.user = str(cc_num[0].value) 
+				protocols = json.loads(data['protocols'])
+				
+				ccipher, cdigest, cmode = self.choose_alg(protocols['cipher'],protocols['digest'],protocols['mode'])
+
+				if session.cipher != ccipher or session.digest != cdigest or session.mode != cmode:
+					message=json.dumps({'method':'NACK','content':'The Choosen Algorithms were downgraded'}).encode('latin')
+				else:
+					message=json.dumps({
+						'method':'ACK' 
+					}).encode('latin')
+					session.state='VERIFY_CHALLENGE'
+					cc_num=session.cert.subject.get_attributes_for_oid(NameOID.SERIAL_NUMBER)
+					session.user = str(cc_num[0].value) 
 			except:
 				logger.debug("Challenge Wrong")
 				message=json.dumps({
@@ -618,30 +663,43 @@ class MediaServer(resource.Resource):
 			logger.debug(request.args)
 			#params=j
 			session.state='SERVER_LIST'
-			message=json.dumps({'method':'ACK', 'media_list':media_list})
+			data=json.dumps({'method':'ACK', 'media_list':media_list})
 
 		key,salt = self.derive_key(session.shared_key,session)
-		cryptogram,iv=self.encrypt_message(json.dumps(message).encode('latin'),session,key)
+		cryptogram,iv=self.encrypt_message(json.dumps(data).encode('latin'),session,key)
 		hmac=self.add_hmac(cryptogram,session,key)
 		#print(type(cryptogram.decode('latin')))
-		message = base64.b64encode(cryptogram).decode('latin')
+		data = base64.b64encode(cryptogram).decode('latin')
 		iv = base64.b64encode(iv).decode('latin')
 		salt=base64.b64encode(salt).decode('latin')
 		hmac=base64.b64encode(hmac).decode('latin')
-		data= {'message':message,'iv':iv,'salt':salt ,'hmac': hmac}
-		return json.dumps(data, indent=4).encode('latin')
+		response= {'message':data,'iv':iv,'salt':salt ,'hmac': hmac}
+		return json.dumps(response, indent=4).encode('latin')
 
 	def send_license(self,session,media_id):
-		cert = self.gen_license(session,media_id)
+		#licenses = self.licenses[media_id]
 		key, salt = self.derive_key(session.shared_key,session)
-		content,iv = self.encrypt_message(json.dumps({
-			'method':'ACK',
-			'license':cert.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin'),session,key)
+		data,iv=None,None
+		if session.state == 'SERVER_LIST':
+			if media_id in self.licenses and any(license.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == session.user for license in self.licenses[media_id]):
+					data,iv = self.encrypt_message(json.dumps({
+					'method':'NACK',
+					'content':'Cannot Obtain license. Client already has one'}).encode('latin'),session,key);
+			else:
+				cert = self.gen_license(session,media_id)
+				data,iv = self.encrypt_message(json.dumps({
+					'method':'ACK',
+					'license':cert.public_bytes(serialization.Encoding.PEM).decode('latin')}).encode('latin'),session,key)
+		else:
+			data,iv = self.encrypt_message(json.dumps({
+				'method':'NACK',
+				'content':'Cannot Obtain license. Invalid State'}).encode('latin'),session,key);
+
 		response=json.dumps({
-			'message':base64.b64encode(content).decode('latin'),
+			'message':base64.b64encode(data).decode('latin'),
 			'iv':base64.b64encode(iv).decode('latin'),
 			'salt':base64.b64encode(salt).decode('latin'),
-			'hmac':base64.b64encode(self.add_hmac(content,session,key)).decode('latin'),
+			'hmac':base64.b64encode(self.add_hmac(data,session,key)).decode('latin'),
 		})
 		logger.debug("Sent license")
 		return response.encode('latin')

@@ -32,6 +32,7 @@ logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
+logger.setLevel(logging.ERROR)
 
 SERVER_URL = 'http://127.0.0.1:8080'
 class License:
@@ -95,7 +96,7 @@ class Client:
 			)
 			return True
 		except:
-			logger.info("Could not Validate the Signature of the Certificate")
+			logger.error("Could not Validate the Signature of the Certificate")
 			return False
 	
 
@@ -117,8 +118,9 @@ class Client:
 			logger.info("Server Signature OK")
 			return True
 		except:
-			logger.info("Server Signature Wrong")
-
+			logger.error("Server Signature Wrong")
+			return False
+	
 
 
 	def crl_validation(self, cert):
@@ -161,7 +163,7 @@ class Client:
 							
 				logger.info("Certicates loaded!")
 		except:
-			logger.info("Could not load certificates")
+			logger.error("Could not load certificates.Make sure to run this file on the /client directory")
 	
 	
 	def load_crl(self,path):
@@ -177,7 +179,7 @@ class Client:
 						
 				logger.info("Certicates loaded!")
 		except:
-			logger.info("Could not read Path!")
+			logger.error("Could not read Path!Make sure to run this file on the /client directory")
 
 
 	def build_cert_chain(self,certificate):
@@ -277,7 +279,7 @@ class Client:
 				self.state = 'DH_START'
 				logger.info("Signatures OK")
 			else:
-				logger.info("Signatures wrong")
+				logger.error("Signatures wrong")
 		else:
 			return False
 
@@ -307,7 +309,7 @@ class Client:
 				self.shared_key = self.private_key.exchange(self.srvr_publickey)
 				self.state='KEY_EXCHANGE'
 			else:
-				logger.info('Could not exchange a key with the server')
+				logger.error('Could not exchange a key with the server')
 		else:
 			return False
 
@@ -327,7 +329,7 @@ class Client:
 		else:
 			iv = os.urandom(16)
 			algorithm = algorithms.ChaCha20(enc_shared_key, iv)
-			logger.debug('Algorithm not suported')
+			logger.error('Algorithm not suported')
 		
 		if self.cipher != 'ChaCha20':
 			# with ChaCha20 we do not pad the data
@@ -450,7 +452,7 @@ class Client:
 			message = json.dumps({
 				'method': 'START_CHALLENGE',
 				'nonce': nonce.decode('latin'), 
-				'cert': self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin')
+				'cert': self.certificate.public_bytes(serialization.Encoding.PEM).decode('latin'),
 			}).encode('latin')		
 			data,iv = self.encrypt_message(message,key)
 			
@@ -507,11 +509,13 @@ class Client:
 			logger.info("Challenge OK")
 			return True
 		except:
-			logger.info("Challenge wrong. Comms Compromised")
+			logger.error("Challenge wrong. Comms Compromised")
 			return False
 
 	def accept_challenge(self,nonce2):
-		"""Accepts Server challenge and sends signed Nonce"""
+		"""Accepts Server challenge and sends signed Nonce.
+			Also it is sent the protocols that the client is using, in order to verify if they were not downgraded
+		"""
 		logger.info("Sending POST to accept Challenge")
 		if self.state=='START_CHALLENGE':
 			snonce2 = self.sign_message(nonce2)
@@ -522,11 +526,14 @@ class Client:
 					'Content-Type': 'application/json',
 					'session_id': str(self.session_id)
 				}
-			
-			message = json.dumps({'method': 'ACCEPT_CHALLENGE','snonce2':snonce2.decode('latin')}).encode('latin')
+			message = json.dumps({
+				'method': 'ACCEPT_CHALLENGE',
+				'snonce2':snonce2.decode('latin'),
+				'protocols':json.dumps({'cipher':self.ciphers,'mode':self.ciphermodes,'digest':self.digests})
+			}).encode('latin')
 			data, iv = self.encrypt_message(message,key)
 			
-			logger.info("Sucessfuly encrypted challenge and certificate")
+			logger.info("Sucessfuly encrypted challenge,certificate and communication protocols.")
 
 			
 			message = {
@@ -542,12 +549,7 @@ class Client:
 			response = json.loads(request.text)
 
 			message, key, iv, salt, hmac = self.receive_message(response)
-			#iv = base64.b64decode(response['iv'])
-			#hmac = base64.b64decode(response['hmac'])
-			#salt = base64.b64decode(response['salt'])
-			#msg = base64.b64decode(response['message'])
-			
-			#key, _ = self.derive_key(self.shared_key,salt)
+
 			if not self.verify_hmac(hmac,message,key):
 				exit(0)
 			else:
@@ -557,7 +559,7 @@ class Client:
 				if message['method'] == 'ACK':
 					self.state='ACCEPT_CHALLENGE'					
 				else:
-					logger.info(message['content'])
+					logger.error(message['content'])
 					return False
 		else:
 			return False
@@ -618,7 +620,7 @@ class Client:
 			h.verify(recv_hmac)
 			return True
 		except:
-			logger.info("HMAC Wrong. Communications will not continue")
+			logger.error("HMAC Wrong. Communications will not continue")
 			return False
 
 	def get_list(self):
@@ -697,7 +699,7 @@ class Client:
 					logger.info("goodbye")
 					return 
 			else:
-				logger.info(content['content'])
+				logger.error(content['content'])
 			return		
 		else:
 			return
@@ -745,7 +747,6 @@ class Client:
 				}
 				req = requests.get(f'{SERVER_URL}/api',headers=headers)
 
-				logger.info("Got new License")
 				##response
 				response = json.loads(req.text)
 				message, key, iv, salt, hmac = self.receive_message(response)
@@ -759,9 +760,14 @@ class Client:
 					exit(0)
 				else:
 					message = json.loads(self.decrypt_message(message,iv,key))
-					license = message['license']
-					self.licenses['media_id'] = x509.load_pem_x509_certificate(license.encode('latin'))
-					return self.start_download(media_id)
+					if message['method'] == 'ACK':
+						license = message['license']
+						logger.info("Got new License")
+						self.licenses['media_id'] = x509.load_pem_x509_certificate(license.encode('latin'))
+						return self.start_download(media_id)
+					else:
+						logger.error(message['content'])
+						return False
 		else:
 			return False
 
@@ -817,7 +823,7 @@ class Client:
 					self.state = 'START_DOWNLOAD'
 					return True
 				else:
-					logger.info(message['content'])		
+					logger.error(message['content'])		
 					return False
 		else:
 			return False
@@ -912,9 +918,9 @@ def main():
 				except:
 					break
 			else :
-				logger.info(data['content'])
+				logger.error(data['content'])
 		else:
-			logger.info("HMAC Wrong. Communications compromised")
+			logger.error("HMAC Wrong. Communications compromised")
 			exit(0)
 
 
