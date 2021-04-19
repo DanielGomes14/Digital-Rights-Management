@@ -1,4 +1,0 @@
--> Como derivamos a chave para obter a lista de conteudo?
--> Usamos a digest da concat de media_id + chunk_id como password para PBKDF?
--> Como identicar cada utilizador?
-
